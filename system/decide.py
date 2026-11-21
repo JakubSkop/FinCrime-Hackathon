@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from matchers import Disposition, explain_alert, prepare_parsed
+from coverage import close_survives_residual
+from matchers import Disposition, explain_alert, match_invoice, prepare_parsed
 from policy import InstitutionPolicy, get_policy, validate_reason_code
 from reason import build_reason
 
@@ -50,38 +51,49 @@ def _pick_code(codes: list[str], order: list[str]) -> str:
     return sorted(codes, key=lambda c: rank.get(c, 999))[0]
 
 
-def _payments_fx_invoice_gate(
+def _payments_fx_held_path(
     bundle: dict[str, Any], policy: InstitutionPolicy, parsed: list[dict[str, Any]]
 ) -> Disposition | None:
-    """Extra case-level gate for held outbound payments."""
+    """First-class decision path centred on the held outbound payment."""
     from evidence_parse import names_overlap
-    from matchers import match_invoice
 
     held = bundle.get("held_payment")
-    if not held or not policy.invoice_gate_gbp:
+    if not held or bundle.get("institution") != "payments_fx":
         return None
-    amt = float(held.get("amount_gbp") or 0.0)
-    if amt < policy.invoice_gate_gbp:
-        return None
+
     customer = bundle["customer"]
-    if names_overlap(held.get("counterparty_name"), customer.get("name")):
-        return None
+    amt = float(held.get("amount_gbp") or 0.0)
+    cp = held.get("counterparty_name")
+    own = names_overlap(cp, customer.get("name"))
+
+    # Own-name held payment: treat as own-account if a proving doc exists.
+    if own:
+        from matchers import match_own_account
+
+        own_disp = match_own_account(parsed, [held], customer, policy)
+        if own_disp:
+            return own_disp
+
     inv = match_invoice(parsed, [held], customer)
     if inv and inv.verdict == "CLOSE":
         return inv
     if inv and inv.verdict == "ESCALATE":
         return inv
-    return Disposition(
-        "RFI",
-        "RFI_PURPOSE_DOCUMENTS",
-        [held["transaction_id"]],
-        [
-            f"Held payment {held['transaction_id']} of £{amt:,.2f} to "
-            f"{held.get('counterparty_name')} needs an invoice or contract on file "
-            f"before release."
-        ],
-        weight=70,
-    )
+
+    gate = policy.invoice_gate_gbp
+    if gate and amt >= gate and not own:
+        return Disposition(
+            "RFI",
+            "RFI_PURPOSE_DOCUMENTS",
+            [held["transaction_id"]],
+            [
+                f"Held payment {held['transaction_id']} of £{amt:,.2f} to {cp} is "
+                f"£{gate:,.0f}+ and has no matching invoice or contract on file; ask for "
+                f"that invoice/contract before release."
+            ],
+            weight=78,
+        )
+    return None
 
 
 def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
@@ -89,19 +101,21 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
     parsed = prepare_parsed(bundle)
     case = bundle["case"]
 
-    dispositions = [explain_alert(bundle, alert, parsed, policy) for alert in bundle["alerts"]]
+    dispositions: list[Disposition] = []
 
-    gate = _payments_fx_invoice_gate(bundle, policy, parsed)
-    if gate:
-        dispositions.append(gate)
+    # Payments/FX: decide the held payment first, then the alerts.
+    held_disp = _payments_fx_held_path(bundle, policy, parsed)
+    if held_disp:
+        dispositions.append(held_disp)
+
+    dispositions.extend(
+        explain_alert(bundle, alert, parsed, policy) for alert in bundle["alerts"]
+    )
 
     # Conservative aggregation.
     if any(d.verdict == "ESCALATE" for d in dispositions):
         esc = [d for d in dispositions if d.verdict == "ESCALATE"]
-        primary = max(esc, key=lambda d: d.weight)
-        # Prefer priority list if weights tie-ish
         code = _pick_code([d.reason_code for d in esc], ESC_PRIORITY)
-        # Keep the facts from the highest-weight escalate with that code if possible.
         chosen = max(
             [d for d in esc if d.reason_code == code] or esc,
             key=lambda d: d.weight,
@@ -110,14 +124,20 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
         reason_code = chosen.reason_code
         use = esc + [d for d in dispositions if d.verdict != "ESCALATE"]
     elif dispositions and all(d.verdict == "CLOSE" for d in dispositions):
-        verdict = "CLOSE"
-        code = _pick_code([d.reason_code for d in dispositions], CLOSE_PRIORITY)
-        chosen = max(
-            [d for d in dispositions if d.reason_code == code],
-            key=lambda d: d.weight,
-        )
-        reason_code = chosen.reason_code
-        use = dispositions
+        residual = close_survives_residual(bundle, dispositions)
+        if residual is not None:
+            verdict = "RFI"
+            reason_code = residual.reason_code
+            use = [residual] + list(dispositions)
+        else:
+            verdict = "CLOSE"
+            code = _pick_code([d.reason_code for d in dispositions], CLOSE_PRIORITY)
+            chosen = max(
+                [d for d in dispositions if d.reason_code == code],
+                key=lambda d: d.weight,
+            )
+            reason_code = chosen.reason_code
+            use = dispositions
     elif any(d.verdict == "RFI" for d in dispositions) and all(
         d.verdict in {"CLOSE", "RFI"} for d in dispositions
     ):
@@ -126,7 +146,6 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
         code = _pick_code([d.reason_code for d in rfis], RFI_PRIORITY)
         chosen = max([d for d in rfis if d.reason_code == code], key=lambda d: d.weight)
         reason_code = chosen.reason_code
-        # Prefer RFI facts so CLOSE side-notes do not muddy the ask.
         use = rfis + [d for d in dispositions if d.verdict == "CLOSE"]
     else:
         verdict = "ESCALATE"
@@ -142,7 +161,6 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
         ]
 
     if not validate_reason_code(verdict, reason_code):
-        # Fail closed.
         verdict = "ESCALATE"
         reason_code = "ESC_UNEXPLAINED_FUNDS"
 
@@ -150,14 +168,12 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
     for d in use:
         for eid in d.evidence_ids:
             if eid and eid not in evidence_ids:
-                # Only keep IDs that exist in this institution folder context.
                 evidence_ids.append(eid)
-
     evidence_ids = _filter_existing_ids(bundle, evidence_ids)
 
-    reason = build_reason(use, verdict, reason_code)
+    reason = build_reason(use, verdict, reason_code, bundle=bundle)
 
-    return {
+    decision = {
         "case_id": case["case_id"],
         "alert_ids": list(case["alert_ids"]),
         "verdict": verdict,
@@ -165,6 +181,16 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
         "reason": reason,
         "evidence": evidence_ids,
     }
+
+    # Optional polish: may rewrite reason text only.
+    try:
+        from llm_reason import polish_reason
+
+        decision["reason"] = polish_reason(bundle, decision)
+    except Exception:
+        pass
+
+    return decision
 
 
 def _filter_existing_ids(bundle: dict[str, Any], ids: list[str]) -> list[str]:

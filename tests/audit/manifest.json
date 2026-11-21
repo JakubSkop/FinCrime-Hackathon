@@ -7,7 +7,7 @@
     "reason_code": "must match reason_code or accepted_reason_codes",
     "must_cite": "if non-empty, system evidence must include all listed IDs"
   },
-  "total_cases": 286,
+  "total_cases": 279,
   "institutions": {
     "bank": {
       "count": 80,
@@ -27,10 +27,10 @@
       }
     },
     "emoney": {
-      "count": 80,
+      "count": 74,
       "verdicts": {
         "ESCALATE": 26,
-        "CLOSE": 32,
+        "CLOSE": 26,
         "RFI": 22
       },
       "patterns": {
@@ -39,23 +39,23 @@
         "own_account_5x": 10,
         "cash_records_single": 6,
         "list_diff_tm22_only": 7,
-        "refund_single": 9,
+        "refund_single": 3,
         "tm02_tm04_unexplained": 12,
         "list_name_only": 12
       }
     },
     "investment": {
-      "count": 61,
+      "count": 60,
       "verdicts": {
-        "CLOSE": 21,
-        "ESCALATE": 22,
-        "RFI": 18
+        "CLOSE": 30,
+        "RFI": 18,
+        "ESCALATE": 12
       },
       "patterns": {
         "gift_letter_clean": 20,
-        "tm10_early_redemption": 22,
+        "tm10_documented_need": 10,
         "own_account_5x": 18,
-        "refund_single": 1
+        "tm10_early_redemption": 12
       }
     },
     "payments_fx": {
