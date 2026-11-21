@@ -1,9 +1,16 @@
-"""Optional OpenRouter reason polish. Never changes verdict, reason_code, or evidence."""
+"""Optional OpenRouter reason polish. Never changes verdict, reason_code, or evidence.
+
+The case decision is always produced by the rules first. Polishing may replace
+only the reason sentence, and only when OpenRouter returns usable text. If the
+key is unset, the request fails, or the model is unavailable, the rule-written
+reason is kept and OpenRouter is not called again in this process.
+"""
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from typing import Any
@@ -11,16 +18,51 @@ from typing import Any
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL", "baidu/ernie-5.5-flash-preview:free")
+_TIMEOUT_SECONDS = 10
+
+_disabled = False
+_announced = False
+
+
+def reset_polish_state() -> None:
+    """Clear the process-wide fallback latch. Used by tests."""
+    global _disabled, _announced
+    _disabled = False
+    _announced = False
+
+
+def _polish_requested() -> bool:
+    flag = (os.environ.get("OPENROUTER_POLISH") or "").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    return bool((os.environ.get("OPENROUTER_API_KEY") or "").strip())
+
+
+def polish_enabled() -> bool:
+    """True when this process will attempt an OpenRouter rewrite."""
+    return _polish_requested() and not _disabled
+
+
+def _disable(reason: str) -> None:
+    global _disabled, _announced
+    _disabled = True
+    if _announced:
+        return
+    _announced = True
+    print(
+        "OpenRouter reason polish is unavailable "
+        f"({reason}). Keeping the default rule-written reasons for this run.",
+        file=sys.stderr,
+    )
 
 
 def polish_reason(bundle: dict[str, Any], decision: dict[str, Any]) -> str:
     """Return a polished reason, or the original reason if polishing is unavailable."""
     original = decision.get("reason") or ""
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
+    if not polish_enabled():
         return original
 
-    # Keep prompts tiny and deterministic.
+    api_key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
     facts = {
         "case_id": decision.get("case_id"),
         "verdict": decision.get("verdict"),
@@ -40,7 +82,7 @@ def polish_reason(bundle: dict[str, Any], decision: dict[str, Any]) -> str:
     )
     user = json.dumps(facts, ensure_ascii=False, sort_keys=True)
     payload = {
-        "model": DEFAULT_MODEL,
+        "model": os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL),
         "temperature": 0,
         "messages": [
             {"role": "system", "content": system},
@@ -59,23 +101,52 @@ def polish_reason(bundle: dict[str, Any], decision: dict[str, Any]) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        text = (
-            body.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-            .strip()
-        )
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, KeyError, IndexError):
+        with urllib.request.urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        body = json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        _disable(f"HTTP {exc.code}")
+        return original
+    except Exception as exc:
+        _disable(type(exc).__name__)
         return original
 
+    if not isinstance(body, dict):
+        _disable("invalid response")
+        return original
+    if body.get("error"):
+        err = body["error"]
+        message = err.get("message") if isinstance(err, dict) else str(err)
+        _disable((message or "API error")[:160])
+        return original
+
+    try:
+        choice = (body.get("choices") or [{}])[0]
+        content = (choice.get("message") or {}).get("content", "")
+    except Exception:
+        _disable("invalid response")
+        return original
+
+    text = _content_text(content)
     if not text:
         return original
-    # Hard lock: never accept a rewrite that drops required RFI ask language.
+    # A rewrite that drops the required RFI ask is rejected for this case only.
     if decision.get("verdict") == "RFI" and "ask" not in text.lower():
         return original
-    # Keep length sane.
     if len(text) > 1200:
         return original
     return text
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(str(part.get("text") or ""))
+        return " ".join(p for p in parts if p).strip()
+    return ""
