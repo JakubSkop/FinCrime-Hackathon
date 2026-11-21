@@ -1,5 +1,7 @@
 # Alert-closing system
 
+The challenge, the scoring, and what to deliver are in the [top-level README](../README.md).
+
 This folder is a deterministic Python 3 decision engine. It uses only the standard library. Given one institution folder, it reads every case and writes one verdict per case.
 
 A case is one customer over one review window, with every alert that fired in that window. One verdict covers the whole case:
