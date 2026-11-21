@@ -1,0 +1,77 @@
+{
+  "description": "Independently labelled clear-cut audit cases for regression testing. Each case has one dominant, unambiguous story. Labels come from evidence checks (fraud reports, exact invoice/cash reconciliation, clean gift letters, TM22-only list outcomes, own-account 5\u00d7 RFIs, payments_fx invoice gate, unexplained TM02+TM04 networks, TM10 early redemption). Not copied from system output; ambiguous multi-conflict cases are excluded.",
+  "created": "2026-11-21",
+  "how_to_use": "Run: python3 tests/run_audit.py",
+  "pass_criteria": {
+    "verdict": "must match",
+    "reason_code": "must match reason_code or accepted_reason_codes",
+    "must_cite": "if non-empty, system evidence must include all listed IDs"
+  },
+  "total_cases": 286,
+  "institutions": {
+    "bank": {
+      "count": 80,
+      "verdicts": {
+        "RFI": 22,
+        "ESCALATE": 26,
+        "CLOSE": 32
+      },
+      "patterns": {
+        "list_name_only": 11,
+        "fraud_report": 13,
+        "tm02_tm04_unexplained": 13,
+        "cash_records_single": 12,
+        "own_account_5x": 11,
+        "list_diff_tm22_only": 11,
+        "invoice_match_single": 9
+      }
+    },
+    "emoney": {
+      "count": 80,
+      "verdicts": {
+        "ESCALATE": 26,
+        "CLOSE": 32,
+        "RFI": 22
+      },
+      "patterns": {
+        "fraud_report": 14,
+        "invoice_match_single": 10,
+        "own_account_5x": 10,
+        "cash_records_single": 6,
+        "list_diff_tm22_only": 7,
+        "refund_single": 9,
+        "tm02_tm04_unexplained": 12,
+        "list_name_only": 12
+      }
+    },
+    "investment": {
+      "count": 61,
+      "verdicts": {
+        "CLOSE": 21,
+        "ESCALATE": 22,
+        "RFI": 18
+      },
+      "patterns": {
+        "gift_letter_clean": 20,
+        "tm10_early_redemption": 22,
+        "own_account_5x": 18,
+        "refund_single": 1
+      }
+    },
+    "payments_fx": {
+      "count": 65,
+      "verdicts": {
+        "CLOSE": 32,
+        "RFI": 22,
+        "ESCALATE": 11
+      },
+      "patterns": {
+        "list_diff_tm22_only": 12,
+        "invoice_match_single": 20,
+        "own_account_5x": 12,
+        "list_name_only": 10,
+        "pfx_tm02_tm04_network": 11
+      }
+    }
+  }
+}
