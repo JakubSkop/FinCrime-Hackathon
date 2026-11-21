@@ -10,9 +10,9 @@ Deterministic Python 3 (standard library only) decision engine for the four inst
 4. Apply hard escalate gates (sending-bank fraud reports, mule language in chats, unexplained rapid pass-through, structuring, confirmed listed party, unexplained early redemption, high-risk corridor without docs).
 5. For payments/FX, decide the **held payment** first (invoice gate / own-name / match), then fold in the other alerts.
 6. If unclear but not suspicious → **RFI** with a concrete ask naming the payment where possible.
-7. Only **CLOSE** when every alert is explained **and** residual unexplained alert value is small (per-alert transaction touch, ≥90% value coverage unless leftover ≤ declared baseline, soft identity/profile codes do not count as value coverage).
-8. CLOSE gates reject thin stories: named counterparties required for refund CLOSES, invoice/event party alignment, TM03/04/05/08/10 coverage checks, and no phrase-only `WITHIN_PROFILE` / prior-review `RETURNING_CUSTOMER` closes.
-9. Optional: if `OPENROUTER_API_KEY` is set, polish the reason text at temperature 0. Verdict, reason code, and evidence IDs stay locked.
+7. Only **CLOSE** when every alert is explained **and** residual unexplained value is immaterial or ≤ the declared TM01 baseline (soft identity/profile codes do not count as value coverage). Thresholds are policy/materiality rules, not fits to particular development cases.
+8. CLOSE gates reject thin stories in general terms: named counterparties for refund CLOSES, invoice/event party alignment, majority-leg coverage for multi-tx rules, and no phrase-only `WITHIN_PROFILE` / prior-review `RETURNING_CUSTOMER` closes.
+9. Optional: if `OPENROUTER_API_KEY` is set, polish the reason text at temperature 0. Verdict, reason code, and evidence IDs stay locked. No case IDs, customer names, or development amounts are hardcoded.
 
 Institution-specific thresholds from each `POLICY.md` are encoded in `policy.py`.
 

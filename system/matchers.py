@@ -829,8 +829,9 @@ def match_within_profile(
     measured = alert.get("measured") or {}
     multiple = measured.get("multiple")
     limit = measured.get("limit_multiple")
-    # Phrase-only notes must not CLOSE alerts that clearly exceed the profile limit.
-    if multiple is not None and limit is not None and float(multiple) > float(limit) * 1.05:
+    # TM01 already fired because activity exceeded the profile limit — a staff
+    # phrase alone must not CLOSE that breach (no fudge factor on the limit).
+    if multiple is not None and limit is not None and float(multiple) > float(limit):
         return None
     baseline = declared_baseline_gbp(customer, policy)
     # Only close as within-profile when a free-text contact/staff note explicitly says so.
@@ -1169,34 +1170,24 @@ def _close_covers_alert(
         return any(t["transaction_id"] in cited for t in alert_txs)
 
     if rule == "TM03":
-        # Structuring / repeated below-threshold: need most deposit legs covered.
+        # Structuring / repeated below-threshold: majority of deposit legs covered.
         if len(alert_txs) <= 1:
             return any(t["transaction_id"] in cited for t in alert_txs) or not alert_txs
-        return _cited_share() >= 0.75 or sum(
-            1 for t in alert_txs if t["transaction_id"] in cited
-        ) >= max(2, len(alert_txs) - 1)
+        n_cited = sum(1 for t in alert_txs if t["transaction_id"] in cited)
+        return n_cited >= (len(alert_txs) + 1) // 2
 
     if rule == "TM04":
-        # Fan-in/out: a single matched invoice must not clear a many-party network.
-        if close.reason_code in {"INVOICE_MATCHES", "GROUP_COMPANY", "OWN_ACCOUNT"}:
-            return _cited_share() >= 0.5 or sum(
-                1 for t in alert_txs if t["transaction_id"] in cited
-            ) >= min(3, max(1, len(alert_txs) // 2))
-        return _cited_share() >= 0.6
+        # Fan-in/out: one matched leg must not clear a many-party network.
+        if not alert_txs:
+            return True
+        n_cited = sum(1 for t in alert_txs if t["transaction_id"] in cited)
+        return n_cited >= (len(alert_txs) + 1) // 2 or _cited_share() >= 0.5
 
-    if rule == "TM08":
-        # Third-party alert: cite at least one third-party leg.
+    if rule in {"TM08", "TM10"}:
+        # Third-party / early-redemption: cite at least one alerted leg.
         if not alert_txs:
             return True
         return any(t["transaction_id"] in cited for t in alert_txs)
-
-    if rule == "TM10":
-        if not alert_txs:
-            return True
-        return any(t["transaction_id"] in cited for t in alert_txs) or close.reason_code in {
-            "DOCUMENTED_EVENT",
-            "OWN_ACCOUNT",
-        }
 
     if rule != "TM01":
         return True
