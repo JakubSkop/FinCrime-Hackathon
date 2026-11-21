@@ -185,7 +185,7 @@ On `payments_fx`, a case can include a payment that has not been released. That 
 - If an invoice or contract matches it, that match stands, including a payee mismatch.
 - If it is £10,000 or more to anyone other than the client and nothing matches, the case asks for that invoice before release.
 
-The alerts are still decided afterwards. An escalate on another alert still escalates the case.
+The alerts are still decided afterwards. Soft `ESC_PASS_THROUGH` defaults cannot override a documented held CLOSE when no hard suspicion code is present — remaining unexplained outs become a purpose/invoice RFI (residual coverage still blocks thin CLOSEs). Hard escalate codes (mule, unexplained third-party funding, list, fraud, structuring, and similar) still escalate the case.
 
 ## Customer history
 
