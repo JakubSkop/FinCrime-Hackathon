@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Build an alert-closing system
 
 Start with `BRIEF.html`, which explains transaction monitoring, the four institutions, their rules and how you are scored. This file is the short version, with what you need while you build.
@@ -124,6 +123,3 @@ We run your system **five times** on the unseen cases and assess it on four thin
 | Reproducibility | 20% | Same verdict and reason code in all five runs |
 
 Verdicts score the share of the cost of escalating every case that your system saves, so escalating everything scores 0. Reproducibility points grow with the unseen score, so repeating poor results earns little. We also run your system once more on the development cases to check that your development answers came from it.
-=======
-# FinCrime-Hackathon
->>>>>>> 0383f938fead9731529fd06240c35286ae14af31
