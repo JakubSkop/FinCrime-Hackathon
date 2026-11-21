@@ -101,6 +101,11 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
     parsed = prepare_parsed(bundle)
     case = bundle["case"]
 
+    # Statistical priors (demote / corroborate only — never CLOSE alone).
+    from stats import attach_stats
+
+    attach_stats(bundle)
+
     dispositions: list[Disposition] = []
 
     # Payments/FX: decide the held payment first, then the alerts.

@@ -96,6 +96,17 @@ def build_reason(
             sentences.append(ask)
         sentences = sentences[:4]
 
+    # Corroborate document-backed CLOSE with periodicity / typical-amount stats.
+    if verdict == "CLOSE" and bundle is not None:
+        from stats import corroboration_sentence
+
+        evidence_ids: list[str] = []
+        for d in dispositions:
+            evidence_ids.extend(d.evidence_ids)
+        corr = corroboration_sentence(bundle.get("stats"), evidence_ids)
+        if corr and corr not in sentences:
+            sentences.append(corr if corr.endswith(".") else corr + ".")
+
     # Collapse accidental duplicate ask sentences.
     deduped: list[str] = []
     seen_asks = 0

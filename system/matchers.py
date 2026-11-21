@@ -1228,10 +1228,47 @@ def default_for_rule(
 ) -> Disposition:
     tx_ids = [t["transaction_id"] for t in alert_txs[:4]]
     measured = alert.get("measured") or {}
+    stats = bundle.get("stats") or {}
+    novel_ids = set(stats.get("novel_large_tx_ids") or [])
+    periodic_ids = set(stats.get("periodic_legs") or [])
+    inbound_vs = float(stats.get("inbound_month_vs_history") or 0.0)
+    cash_vs = float(stats.get("cash_vs_history") or 0.0)
 
     if rule == "TM02":
         # Rapid movement without explanation → pass-through / mule-ish.
-        distinct = measured.get("distinct_counterparties")
+        outs = [t for t in alert_txs if t.get("direction") == "out"]
+        novel_outs = [t for t in outs if t["transaction_id"] in novel_ids]
+        periodic_ins = [
+            t
+            for t in alert_txs
+            if t.get("direction") == "in" and t["transaction_id"] in periodic_ids
+        ]
+        periodic_outs = [t for t in outs if t["transaction_id"] in periodic_ids]
+        if novel_outs:
+            return Disposition(
+                "ESCALATE",
+                "ESC_PASS_THROUGH",
+                tx_ids,
+                [
+                    "Funds are received and paid out rapidly to statistically novel "
+                    "counterparties with no document on file that explains a legitimate "
+                    "purpose for the pass-through."
+                ],
+                weight=78,
+            )
+        if periodic_ins and periodic_outs and not novel_outs:
+            # Known recurring payees — still need docs to CLOSE; prefer RFI over mule.
+            return Disposition(
+                "RFI",
+                "RFI_PURPOSE_DOCUMENTS",
+                tx_ids,
+                [
+                    "Funds move quickly between counterparties that look like this "
+                    "customer's recurring pattern, but nothing on file explains the "
+                    "pass-through; ask for purpose documents for the alerted payments."
+                ],
+                weight=62,
+            )
         return Disposition(
             "ESCALATE",
             "ESC_PASS_THROUGH",
@@ -1283,6 +1320,18 @@ def default_for_rule(
     if rule == "TM05":
         amt = measured.get("amount_gbp")
         amt_txt = f" of £{float(amt):,.2f}" if amt is not None else ""
+        if cash_vs >= 10.0:
+            return Disposition(
+                "RFI",
+                "RFI_SOURCE_OF_FUNDS",
+                tx_ids,
+                [
+                    f"Ask for source-of-funds documents for the large cash activity{amt_txt}; "
+                    f"it is about {cash_vs:.0f}× this customer's historical cash median "
+                    f"(or first cash of this size on file)."
+                ],
+                weight=64,
+            )
         return Disposition(
             "RFI",
             "RFI_SOURCE_OF_FUNDS",
@@ -1294,13 +1343,41 @@ def default_for_rule(
         )
 
     if rule == "TM06":
+        from policy import HR_COUNTRIES, HR_COUNTRY_CODES
+
+        declared = customer.get("declared") or {}
+        expected = {
+            str(c).strip().lower()
+            for c in (declared.get("expected_countries") or [])
+            if c
+        }
+        hr_names = {c.lower() for c in HR_COUNTRIES}
+        countries = measured.get("countries") or ""
+        country_bits = [p.strip() for p in str(countries).split(",") if p.strip()]
+        undeclared_hr = [
+            c
+            for c in country_bits
+            if c.lower() in hr_names and c.lower() not in expected
+        ]
+        # Also check alerted tx country codes against HR list.
+        for t in alert_txs:
+            cc = str(t.get("counterparty_country") or "").upper()
+            if cc in HR_COUNTRY_CODES:
+                name_guess = cc
+                if name_guess not in {u.upper() for u in undeclared_hr}:
+                    undeclared_hr.append(cc)
+        detail = (
+            f" Undeclared higher-risk corridor: {', '.join(undeclared_hr)}."
+            if undeclared_hr
+            else ""
+        )
         return Disposition(
             "ESCALATE",
             "ESC_HIGH_RISK_CORRIDOR",
             tx_ids,
             [
                 "Payments involve an undeclared higher-risk country and nothing on file "
-                "explains the corridor activity."
+                f"explains the corridor activity.{detail}"
             ],
             weight=80,
         )
@@ -1347,26 +1424,71 @@ def default_for_rule(
     if rule == "TM01":
         # Over profile without docs → RFI for purpose/source, not auto-escalate.
         kind = customer.get("kind")
+        novel_ins = [
+            t
+            for t in alert_txs
+            if t.get("direction") == "in" and t["transaction_id"] in novel_ids
+        ]
+        mostly_periodic = bool(alert_txs) and all(
+            t["transaction_id"] in periodic_ids
+            for t in alert_txs
+            if t.get("direction") == "in"
+        )
+        surge = inbound_vs >= 2.0 and not mostly_periodic
         if kind == "business" or _docs_of(parsed, COLLECTION_TYPES):
+            facts = [
+                "Receipts exceed the declared profile; ask for business records that "
+                "support the higher volume."
+            ]
+            if surge:
+                facts.append(
+                    f"Inbound volume in the alert window is about {inbound_vs:.1f}× the "
+                    f"customer's historical monthly median."
+                )
+            if novel_ins:
+                sample = max(novel_ins, key=lambda t: float(t.get("amount_gbp") or 0.0))
+                facts.append(
+                    f"Includes a novel inbound {sample['transaction_id']} of "
+                    f"£{float(sample['amount_gbp']):,.2f}"
+                    + (
+                        f" from {sample.get('counterparty_name')}."
+                        if sample.get("counterparty_name")
+                        else "."
+                    )
+                )
             return Disposition(
                 "RFI",
                 "RFI_BUSINESS_RECORDS",
                 tx_ids,
-                [
-                    "Receipts exceed the declared profile; ask for business records that "
-                    "support the higher volume."
-                ],
-                weight=55,
+                facts,
+                weight=58 if surge or novel_ins else 55,
+            )
+        facts = [
+            "Receipts exceed the declared expected income/volume; ask for source-of-funds "
+            "documents for the excess."
+        ]
+        if surge:
+            facts.append(
+                f"Inbound volume in the alert window is about {inbound_vs:.1f}× the "
+                f"customer's historical monthly median."
+            )
+        if novel_ins:
+            sample = max(novel_ins, key=lambda t: float(t.get("amount_gbp") or 0.0))
+            facts.append(
+                f"Includes a novel inbound {sample['transaction_id']} of "
+                f"£{float(sample['amount_gbp']):,.2f}"
+                + (
+                    f" from {sample.get('counterparty_name')}."
+                    if sample.get("counterparty_name")
+                    else "."
+                )
             )
         return Disposition(
             "RFI",
             "RFI_SOURCE_OF_FUNDS",
             tx_ids,
-            [
-                "Receipts exceed the declared expected income/volume; ask for source-of-funds "
-                "documents for the excess."
-            ],
-            weight=55,
+            facts,
+            weight=58 if surge or novel_ins else 55,
         )
 
     # payments_fx invoice gate for held payments.
