@@ -869,6 +869,150 @@ def match_within_profile(
     return None
 
 
+def match_early_redemption(
+    parsed: list[dict[str, Any]],
+    alert_txs: list[dict[str, Any]],
+    customer: dict[str, Any],
+) -> Disposition | None:
+    """Investment TM10: cancellation or documented personal need + own-account payout."""
+    for doc in parsed:
+        if doc["type"] == "cancellation_confirmation":
+            amt = doc.get("primary_amount")
+            ids = [doc["doc_id"]]
+            facts = [
+                f"Cancellation confirmation {doc['doc_id']} explains the early return of "
+                f"subscribed funds"
+                + (f" (£{amt:,.2f})" if amt is not None else "")
+                + "."
+            ]
+            for tx in alert_txs:
+                if amt is not None and _amount_close(float(tx["amount_gbp"]), amt, tol=2.0):
+                    ids.append(tx["transaction_id"])
+            return Disposition("CLOSE", "DOCUMENTED_EVENT", _uniq(ids), facts, weight=88)
+
+    need_docs = [
+        d
+        for d in parsed
+        if d["type"]
+        in {
+            "redundancy_letter",
+            "customer_email",
+            "customer_letter",
+            "completion_statement",
+            "insurer_letter",
+        }
+    ]
+    stmts = _docs_of(parsed, OWN_ACCOUNT_TYPES)
+    strong_need = False
+    need_ids: list[str] = []
+    need_facts: list[str] = []
+    for doc in need_docs:
+        text = doc["text"].lower()
+        personal = any(
+            w in text
+            for w in (
+                "redundant",
+                "redundancy",
+                "living expenses",
+                "made redundant",
+                "completion",
+                "sale of",
+                "property sold",
+                "critical illness",
+            )
+        )
+        if not personal:
+            continue
+        strong_need = True
+        need_ids.append(doc["doc_id"])
+        need_facts.append(
+            f"{doc['doc_id']} documents a legitimate personal reason for selling fund units early."
+        )
+        amt = doc.get("primary_amount")
+        if amt is not None:
+            for tx in alert_txs:
+                if _amount_close(float(tx["amount_gbp"]), amt, tol=2.0):
+                    need_ids.append(tx["transaction_id"])
+                    return Disposition(
+                        "CLOSE",
+                        "DOCUMENTED_EVENT",
+                        _uniq(need_ids),
+                        need_facts
+                        + [
+                            f"Amount £{amt:,.2f} matches alerted movement {tx['transaction_id']}."
+                        ],
+                        weight=87,
+                    )
+
+    if strong_need:
+        for stmt in stmts:
+            if names_overlap(customer.get("name"), stmt.get("account_holder") or stmt["text"]):
+                need_ids.append(stmt["doc_id"])
+                need_facts.append(
+                    f"Withdrawal destination is supported by own-account document {stmt['doc_id']}."
+                )
+                break
+        # Cite redemption/subscription legs when present.
+        for tx in alert_txs:
+            ch = (tx.get("channel") or "").lower()
+            if "fund" in ch or "redempt" in ch or "subscript" in ch:
+                need_ids.append(tx["transaction_id"])
+        return Disposition(
+            "CLOSE",
+            "DOCUMENTED_EVENT",
+            _uniq(need_ids + [t["transaction_id"] for t in alert_txs[:2]]),
+            need_facts,
+            weight=86,
+        )
+    return None
+
+
+def match_investment_third_party(
+    parsed: list[dict[str, Any]],
+    alert_txs: list[dict[str, Any]],
+    customer: dict[str, Any],
+) -> Disposition | None:
+    """Extra TM08 explainers: employment remittance, completion funds, insurer payouts."""
+    for doc in parsed:
+        if doc["type"] not in {
+            "employment_contract",
+            "completion_statement",
+            "insurer_letter",
+            "gift_letter",
+            "redundancy_letter",
+        }:
+            continue
+        amt = doc.get("primary_amount")
+        if amt is None:
+            continue
+        for tx in alert_txs:
+            if not _amount_close(float(tx["amount_gbp"]), amt, tol=2.0):
+                continue
+            # Counterparty should appear in the document when present.
+            if tx.get("counterparty_name") and not names_overlap(
+                tx.get("counterparty_name"), doc["text"]
+            ):
+                # employment/insurer may pay from company name not in short extract
+                if doc["type"] not in {"employment_contract", "insurer_letter", "completion_statement"}:
+                    continue
+            code = (
+                "THIRD_PARTY_DOCUMENTED"
+                if doc["type"] in {"gift_letter", "employment_contract"}
+                else "DOCUMENTED_EVENT"
+            )
+            return Disposition(
+                "CLOSE",
+                code,
+                [doc["doc_id"], tx["transaction_id"]],
+                [
+                    f"{doc['doc_id']} ({doc['type']}) for £{amt:,.2f} explains third-party "
+                    f"or documented funding on {tx['transaction_id']}."
+                ],
+                weight=87,
+            )
+    return None
+
+
 def suspicion_from_chats(parsed: list[dict[str, Any]]) -> Disposition | None:
     for doc in parsed:
         if doc["type"] not in {"support_chat", "contact_note", "staff_note", "customer_email"}:
@@ -926,9 +1070,13 @@ def explain_alert(
         lambda: match_group_company(parsed, alert_txs, customer),
         lambda: match_collection_or_records(parsed, alert_txs),
         lambda: match_documented_event(parsed, alert_txs, customer),
+        lambda: match_investment_third_party(parsed, alert_txs, customer),
         lambda: match_refund(parsed, alert_txs, bundle["customer_transactions"]),
         lambda: match_returning_customer(alert, parsed, reviews, alert_txs),
         lambda: match_within_profile(alert, customer, policy, alert_txs, parsed),
+        lambda: match_early_redemption(parsed, alert_txs, customer)
+        if rule == "TM10"
+        else None,
     ):
         disp = fn()
         if disp:
@@ -1145,25 +1293,9 @@ def default_for_rule(
         )
 
     if rule == "TM10":
-        # Cancellation within cooling-off may be documented.
-        for doc in parsed:
-            if doc["type"] == "cancellation_confirmation":
-                return Disposition(
-                    "CLOSE",
-                    "DOCUMENTED_EVENT",
-                    [doc["doc_id"]] + tx_ids[:1],
-                    [
-                        f"Cancellation confirmation {doc['doc_id']} explains the early "
-                        f"return of subscribed funds."
-                    ],
-                    weight=83,
-                )
-            if doc["type"] in {"customer_email", "customer_letter", "redundancy_letter"} and names_overlap(
-                "sell", doc["text"]
-            ):
-                # Still early redemption used to move money — escalate unless clear personal reason
-                # with own-account destination.
-                pass
+        explained = match_early_redemption(parsed, alert_txs, customer)
+        if explained:
+            return explained
         return Disposition(
             "ESCALATE",
             "ESC_EARLY_REDEMPTION",
