@@ -10,7 +10,7 @@ from typing import Any
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+DEFAULT_MODEL = os.environ.get("OPENROUTER_MODEL", "baidu/ernie-5.5-flash-preview:free")
 
 
 def polish_reason(bundle: dict[str, Any], decision: dict[str, Any]) -> str:

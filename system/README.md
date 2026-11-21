@@ -20,7 +20,7 @@ Institution-specific thresholds from each `POLICY.md` are encoded in `policy.py`
 
 Default: no language model (fully deterministic rules + templates).
 
-Optional reason polish via OpenRouter chat completions when `OPENROUTER_API_KEY` is present (`OPENROUTER_MODEL` overrides the default model). Polishing cannot change the decision.
+Optional reason polish via OpenRouter chat completions when `OPENROUTER_API_KEY` is present. Default model is `baidu/ernie-5.5-flash-preview:free` (`OPENROUTER_MODEL` overrides). Polishing cannot change the decision.
 
 ## Run
 
@@ -39,4 +39,4 @@ python3 tests/run_audit.py
 
 ## Runtime and cost
 
-On this development set (1,000 cases per institution), a full run is a few seconds per institution with no API key ($0). A 200-case run stays well under the 30-minute / ~$4 budgets even with optional reason polish, provided a cheap model is used.
+On this development set (1,000 cases per institution), a full run is a few seconds per institution with no API key ($0). A 200-case run stays well under the 30-minute / ~$4 budgets even with optional reason polish (default free OpenRouter model).
