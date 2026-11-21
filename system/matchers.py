@@ -130,7 +130,12 @@ def match_invoice(
             ):
                 # Named supplier/payee must align with the counterparty — no amount-only CLOSE.
                 continue
-            # Amount-only is allowed only when the document has no parseable supplier/payee.
+            # No parseable supplier: still require a named counterparty to appear in the
+            # document text (POLICY: amount + payee + date). Cash/null CP may amount-match.
+            if not supplier:
+                cp = tx.get("counterparty_name")
+                if cp and not names_overlap(cp, doc["text"]):
+                    continue
             found = None
             for i, amt in enumerate(amounts):
                 if i in used_amt_idx:
@@ -296,10 +301,9 @@ def match_own_account(
                         " ", ""
                     ):
                         acct_ok = True
-            text_ok = names_overlap(customer.get("name"), doc["text"]) or "in your name" in doc[
-                "text"
-            ].lower()
-            if not (name_ok or acct_ok or text_ok):
+            # Customer name on their own statement is not enough: the alerted leg must
+            # be same-name or the counterparty account must appear on the proving doc.
+            if not (name_ok or acct_ok):
                 continue
             ids = [doc["doc_id"], tx["transaction_id"]]
             facts = [

@@ -12,7 +12,7 @@ Deterministic Python 3 (standard library only) decision engine for the four inst
 6. For payments/FX, decide the **held payment** first (invoice gate / own-name / match), then fold in the other alerts.
 7. If unclear but not suspicious → **RFI** with a concrete ask naming the payment where possible (defaults may cite novelty / monthly surge).
 8. Only **CLOSE** when every alert is explained **and** residual unexplained value is immaterial or ≤ the declared TM01 baseline (soft identity/profile codes do not count as value coverage; uncited novel-large legs demote to RFI).
-9. CLOSE gates reject thin stories in general terms: named counterparties for refund CLOSES, invoice/event party alignment, majority-leg coverage for multi-tx rules, and no phrase-only `WITHIN_PROFILE` / prior-review `RETURNING_CUSTOMER` closes.
+9. CLOSE gates reject thin stories in general terms: named counterparties for refund CLOSES, invoice/event party alignment (including counterparty-in-text when an invoice has no parseable supplier), own-account only when the alerted leg is same-name or account-matched on the proving doc, majority-leg coverage for multi-tx rules, and no phrase-only `WITHIN_PROFILE` / prior-review `RETURNING_CUSTOMER` closes.
 10. Optional: if `OPENROUTER_API_KEY` is set, polish the reason text at temperature 0. Verdict, reason code, and evidence IDs stay locked. No case IDs, customer names, or development amounts are hardcoded.
 
 Institution-specific thresholds from each `POLICY.md` are encoded in `policy.py`.
