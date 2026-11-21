@@ -43,16 +43,15 @@ def load_labels(institution: str | None) -> list[dict]:
 
 
 def _missing_citations(data, lab: dict, result: dict) -> list[str]:
-    """Return must_cite IDs that are absent, allowing same-type evidence substitutes."""
+    """Return citation problems for must_cite IDs and/or must_cite_types."""
     cited = set(result.get("evidence") or [])
     missing: list[str] = []
+
     for eid in lab.get("must_cite") or []:
         if eid in cited:
             continue
         meta = data.evidence_meta.get(eid)
         if meta:
-            # Another cited document of the same type is an acceptable substitute
-            # (e.g. a different bank statement proving own-account).
             same_type = {
                 doc_id
                 for doc_id, m in data.evidence_meta.items()
@@ -62,6 +61,17 @@ def _missing_citations(data, lab: dict, result: dict) -> list[str]:
             if cited & same_type:
                 continue
         missing.append(eid)
+
+    required_types = lab.get("must_cite_types") or []
+    if required_types:
+        cited_types = {
+            data.evidence_meta[eid]["type"]
+            for eid in cited
+            if eid in data.evidence_meta
+        }
+        if not (cited_types & set(required_types)):
+            missing.append(f"types:{sorted(required_types)}")
+
     return missing
 
 
