@@ -219,11 +219,71 @@ def match_own_account(
     customer: dict[str, Any],
     policy: InstitutionPolicy,
 ) -> Disposition | None:
+    baseline = declared_baseline_gbp(customer, policy)
+    total = sum(float(t["amount_gbp"]) for t in alert_txs)
+    cust_name = customer.get("name")
+
+    # Same-name transfers only count as own-account when a document shows the customer holds it.
+    same_name = [
+        t for t in alert_txs if names_overlap(t.get("counterparty_name"), cust_name)
+    ]
+    support_docs = _docs_of(parsed, OWN_ACCOUNT_TYPES | GROUP_TYPES)
+    support = None
+    for doc in support_docs:
+        if names_overlap(cust_name, doc.get("account_holder") or "") or names_overlap(
+            cust_name, doc["text"]
+        ):
+            # Statement/register must also reference the counterparty account name or number.
+            for tx in same_name:
+                cp = tx.get("counterparty_name")
+                acct = str(tx.get("counterparty_account") or "")
+                if names_overlap(cp, doc["text"]) or (
+                    acct and acct.replace(" ", "") in doc["text"].replace(" ", "")
+                ):
+                    support = doc
+                    break
+            if support:
+                break
+            # Business customer: own company register extract is enough with same-name txs.
+            if (
+                customer.get("kind") == "business"
+                and doc["type"] in GROUP_TYPES
+                and names_overlap(cust_name, doc["text"])
+                and same_name
+            ):
+                support = doc
+                break
+    if same_name and support:
+        ids = [support["doc_id"]] + [t["transaction_id"] for t in same_name]
+        facts = [
+            f"{support['doc_id']} shows {cust_name} holds the counterparty account used in "
+            f"{same_name[0]['transaction_id']} (£{float(same_name[0]['amount_gbp']):,.2f})."
+        ]
+        same_total = sum(float(t["amount_gbp"]) for t in same_name)
+        if baseline > 0 and same_total >= policy.own_account_rfi_multiple * baseline:
+            return Disposition(
+                "RFI",
+                "RFI_UPDATED_PROFILE",
+                _uniq(ids),
+                facts
+                + [
+                    f"Own-account activity of £{same_total:,.2f} is at least "
+                    f"{policy.own_account_rfi_multiple:.0f}× the declared baseline "
+                    f"of £{baseline:,.2f}; ask for an updated expected income or volume."
+                ],
+                weight=84,
+            )
+        return Disposition(
+            "CLOSE",
+            "OWN_ACCOUNT",
+            _uniq(ids),
+            facts,
+            weight=87,
+        )
+
     stmts = _docs_of(parsed, OWN_ACCOUNT_TYPES)
     if not stmts or not alert_txs:
         return None
-    baseline = declared_baseline_gbp(customer, policy)
-    total = sum(float(t["amount_gbp"]) for t in alert_txs)
     for doc in stmts:
         holder = doc.get("account_holder") or ""
         if holder and not names_overlap(holder, customer.get("name")):
@@ -290,13 +350,17 @@ def match_group_company(
             cp = tx.get("counterparty_name")
             if not cp:
                 continue
+            # Payment to/from the customer themselves is not a group-company link.
+            if names_overlap(cp, cust_name):
+                continue
             if not names_overlap(cp, text):
                 continue
-            # Customer should appear as owner/officer somewhere in group docs.
-            if not names_overlap(cust_name, text) and customer.get("kind") == "individual":
-                # Business customer: company number / name may appear instead.
-                if not names_overlap(cust_name, text):
-                    continue
+            # Customer (or their company number) should appear as owner/officer in the doc.
+            cust_ok = names_overlap(cust_name, text)
+            if customer.get("company_number") and str(customer["company_number"]) in text:
+                cust_ok = True
+            if not cust_ok:
+                continue
             return Disposition(
                 "CLOSE",
                 "GROUP_COMPANY",
@@ -425,23 +489,35 @@ def match_documented_event(
                 "cancellation_confirmation",
             } or "refund" in text_l:
                 code = "REFUND_OF_EARLIER_PAYMENT"
-            elif doc["type"] in {
-                "insurer_letter",
-                "solicitor_letter",
-                "settlement_letter",
-            }:
-                code = "DOCUMENTED_EVENT"
             else:
                 code = "DOCUMENTED_EVENT"
             who = tx.get("counterparty_name") or doc.get("payee") or "the counterparty"
+            evidence = [doc["doc_id"], tx["transaction_id"]]
+            facts = [
+                f"{doc['doc_id']} documents £{amt:,.2f} involving {who}, matching "
+                f"transaction {tx['transaction_id']} of £{float(tx['amount_gbp']):,.2f}."
+            ]
+            # Loan for a vehicle: also attach a nearby outbound to a motor/dealer payee.
+            if doc["type"] == "loan_agreement" and any(
+                w in text_l for w in ("car", "vehicle", "motor")
+            ):
+                for out in alert_txs:
+                    if out.get("direction") != "out":
+                        continue
+                    cp = (out.get("counterparty_name") or "").lower()
+                    if any(w in cp for w in ("motor", "car", "auto", "garage", "dealer", "vehicle")):
+                        evidence.append(out["transaction_id"])
+                        facts.append(
+                            f"Loan purpose is a vehicle purchase, matching outbound "
+                            f"{out['transaction_id']} of £{float(out['amount_gbp']):,.2f} to "
+                            f"{out.get('counterparty_name')}."
+                        )
+                        break
             return Disposition(
                 "CLOSE",
                 code,
-                [doc["doc_id"], tx["transaction_id"]],
-                [
-                    f"{doc['doc_id']} documents £{amt:,.2f} involving {who}, matching "
-                    f"transaction {tx['transaction_id']} of £{float(tx['amount_gbp']):,.2f}."
-                ],
+                _uniq(evidence),
+                facts,
                 weight=85,
             )
     return None
@@ -494,7 +570,6 @@ def match_list(
     measured = alert.get("measured") or {}
     entry_id = measured.get("list_entry")
     if not entry_id:
-        # Fall back to parsing message.
         return Disposition(
             "RFI",
             "RFI_COUNTERPARTY_DETAILS",
@@ -507,99 +582,159 @@ def match_list(
         )
     entry = internal_list.get(entry_id) or {}
     matched_on = (measured.get("matched_on") or "").lower()
-    evidence_ids = [entry_id]
+    matched_party = measured.get("matched_party") or ""
+    list_name = entry.get("name") or ""
+    list_dob = entry.get("date_of_birth") or ""
     facts = [
         f"Alert matched internal list entry {entry_id} on {measured.get('matched_on')}: "
-        f"{measured.get('matched_party')}."
+        f"{matched_party}."
     ]
+    tx_ids = [t["transaction_id"] for t in alert_txs[:1]]
 
-    # Strong same-party signals.
     strong = False
-    weak_only = True
-    if "date of birth" in matched_on or "dob" in matched_on:
-        if "month and year" in matched_on and "name" in matched_on:
-            # name + month/year is medium; check register for different full DOB / officer ceased.
-            weak_only = False
-        elif "name" in matched_on:
+    if ("date of birth" in matched_on or "dob" in matched_on) and "name" in matched_on:
+        if "month and year" not in matched_on:
             strong = True
-            weak_only = False
     if "identifier" in matched_on or "internal case" in matched_on:
         strong = True
-        weak_only = False
-    if matched_on.strip() in {"name", "name only"}:
-        weak_only = True
 
-    # Look for register / PSC evidence showing different party or ceased officer.
-    for doc in _docs_of(parsed, GROUP_TYPES | {"reverification_record", "due_diligence_summary"}):
+    # Customer themselves colliding with a listed name but different DOB.
+    cust_dob = customer.get("date_of_birth") or ""
+    if (
+        entry.get("kind") == "individual"
+        and cust_dob
+        and list_dob
+        and cust_dob != list_dob
+        and names_overlap(customer.get("name"), list_name)
+    ):
+        kyc_ids = [d["doc_id"] for d in parsed if d["type"] == "due_diligence_summary"][:1]
+        return Disposition(
+            "CLOSE",
+            "LIST_MATCH_DIFFERENT_PARTY",
+            _uniq([entry_id] + kyc_ids),
+            facts
+            + [
+                f"Customer date of birth {cust_dob} differs from listed party "
+                f"{list_name} ({list_dob})."
+            ],
+            weight=91,
+        )
+
+    registers = _docs_of(parsed, GROUP_TYPES)
+    for doc in registers:
         text = doc["text"]
-        evidence_ids.append(doc["doc_id"])
-        # Different birth year / DOB in register vs list.
-        list_dob = entry.get("date_of_birth") or ""
-        if list_dob and list_dob[:4]:
-            # If document mentions a different year for the same name, different party.
-            years = set(re_years(text))
-            if list_dob[:4] not in years and years and names_overlap(entry.get("name"), text):
+        # Register for the matched company/counterparty.
+        about_counterparty = names_overlap(matched_party, text) or any(
+            names_overlap(t.get("counterparty_name"), text) for t in alert_txs
+        )
+        if not about_counterparty:
+            continue
+
+        listed_on_register = names_overlap(list_name, text)
+        if listed_on_register:
+            # Same person appears on the company record.
+            if list_dob:
+                years = set(re_years(text))
+                # Explicit different birth year next to the listed name → different party.
+                # Heuristic: if year present elsewhere but a nearby officer line has another year.
+                if list_dob[:4] in years:
+                    return Disposition(
+                        "ESCALATE",
+                        "ESC_LISTED_PARTY",
+                        _uniq([entry_id, doc["doc_id"]] + tx_ids),
+                        facts
+                        + [
+                            f"{doc['doc_id']} shows {list_name} linked to the counterparty "
+                            f"with birth details consistent with list entry {entry_id}."
+                        ],
+                        weight=96,
+                    )
+                # Name on register but DOB year absent / conflicting → check ceased wording.
+                if "until" in matched_party.lower() or "until" in text.lower():
+                    return Disposition(
+                        "RFI",
+                        "RFI_COUNTERPARTY_DETAILS",
+                        _uniq([entry_id, doc["doc_id"]] + tx_ids),
+                        facts
+                        + [
+                            f"{doc['doc_id']} mentions {list_name}; ask for documents confirming "
+                            f"whether they still control the counterparty."
+                        ],
+                        weight=70,
+                    )
                 return Disposition(
-                    "CLOSE",
-                    "LIST_MATCH_DIFFERENT_PARTY",
-                    _uniq(evidence_ids + [t["transaction_id"] for t in alert_txs[:1]]),
+                    "ESCALATE",
+                    "ESC_LISTED_PARTY",
+                    _uniq([entry_id, doc["doc_id"]] + tx_ids),
                     facts
                     + [
-                        f"{doc['doc_id']} gives a different birth year than list entry "
-                        f"{entry_id} ({list_dob}), so the matched person is not the listed party."
+                        f"{doc['doc_id']} links listed person {list_name} to the counterparty."
                     ],
-                    weight=92,
+                    weight=94,
                 )
-        if "until " in text.lower() and names_overlap(entry.get("name"), text):
-            # Ceased director — often different/control issue; message may already say until date.
-            if "until" in (measured.get("matched_party") or "").lower():
-                # Could be listed party previously controlled — escalate if still linked payment
-                # without clearer exoneration.
-                pass
-        # Company number mismatch style exoneration via customer DOB vs list.
-        cust_dob = customer.get("date_of_birth") or ""
-        if (
-            entry.get("kind") == "individual"
-            and cust_dob
-            and list_dob
-            and cust_dob != list_dob
-            and names_overlap(customer.get("name"), entry.get("name"))
+
+            return Disposition(
+                "ESCALATE",
+                "ESC_LISTED_PARTY",
+                _uniq([entry_id, doc["doc_id"]] + tx_ids),
+                facts
+                + [
+                    f"{doc['doc_id']} links listed party {list_name} to the counterparty."
+                ],
+                weight=94,
+            )
+
+        # Counterparty company record exists and the listed individual is not on it.
+        if entry.get("kind") == "individual" and (
+            "officer" in text.lower()
+            or "director" in text.lower()
+            or "significant control" in text.lower()
         ):
-            kyc_ids = [
-                d["doc_id"] for d in parsed if d["type"] == "due_diligence_summary"
-            ][:1]
             return Disposition(
                 "CLOSE",
                 "LIST_MATCH_DIFFERENT_PARTY",
-                _uniq([entry_id] + kyc_ids),
+                _uniq([entry_id, doc["doc_id"]] + tx_ids),
                 facts
                 + [
-                    f"Customer date of birth {cust_dob} differs from listed party "
-                    f"{entry.get('name')} ({list_dob})."
+                    f"{doc['doc_id']} is the company record for the counterparty and does not "
+                    f"list {list_name} (DOB {list_dob or 'n/a'}) as an officer or PSC, so this "
+                    f"is not the listed party."
                 ],
-                weight=91,
+                weight=92,
             )
 
-    # Officer name + month/year: check company register for full DOB / different person details.
-    for doc in _docs_of(parsed, GROUP_TYPES):
-        if names_overlap(entry.get("name"), doc["text"]) or names_overlap(
-            measured.get("matched_party"), doc["text"]
-        ):
-            # If register shows officers and list DOB year not aligned to any officer year text.
-            list_year = (entry.get("date_of_birth") or "")[:4]
-            years = re_years(doc["text"])
-            if list_year and years and list_year not in years:
+        # Business list entry vs different company on register.
+        if entry.get("kind") == "business":
+            entry_co = entry.get("identifiers") or {}
+            doc_co = doc.get("company_number")
+            if doc_co and entry_co.get("company_number") and str(doc_co) != str(
+                entry_co.get("company_number")
+            ):
                 return Disposition(
                     "CLOSE",
                     "LIST_MATCH_DIFFERENT_PARTY",
-                    _uniq([entry_id, doc["doc_id"]] + [t["transaction_id"] for t in alert_txs[:1]]),
+                    _uniq([entry_id, doc["doc_id"]] + tx_ids),
                     facts
                     + [
-                        f"Company record {doc['doc_id']} does not support the listed party's "
-                        f"birth year {list_year}."
+                        f"{doc['doc_id']} has company number {doc_co}, which differs from "
+                        f"listed business {list_name}."
                     ],
-                    weight=90,
+                    weight=93,
                 )
+
+    # Name + month/year of birth on an officer without register exoneration.
+    if "month and year" in matched_on and "name" in matched_on:
+        return Disposition(
+            "RFI",
+            "RFI_COUNTERPARTY_DETAILS",
+            _uniq([entry_id] + tx_ids),
+            facts
+            + [
+                "Ask for documents confirming the counterparty officer is not the listed "
+                "person (match is name plus month/year of birth only)."
+            ],
+            weight=60,
+        )
 
     if strong:
         return Disposition(
@@ -614,30 +749,17 @@ def match_list(
             weight=95,
         )
 
-    # Address-only or single weak field → RFI unless other suspicion.
-    if weak_only or "address" in matched_on:
-        return Disposition(
-            "RFI",
-            "RFI_COUNTERPARTY_DETAILS",
-            _uniq([entry_id] + [t["transaction_id"] for t in alert_txs[:1]]),
-            facts
-            + [
-                "Ask the customer who the counterparty is and for documents confirming they "
-                "are not the listed party (the match is on limited details only)."
-            ],
-            weight=55,
-        )
-
+    # Address-only / name-only / unsettled.
     return Disposition(
         "RFI",
         "RFI_COUNTERPARTY_DETAILS",
-        _uniq([entry_id]),
+        _uniq([entry_id] + tx_ids),
         facts
         + [
-            "Nothing on file settles whether the counterparty is the listed party; "
-            "ask for counterparty identity documents."
+            "Ask the customer who the counterparty is and for documents confirming they "
+            "are not the listed party (the match is on limited details only)."
         ],
-        weight=50,
+        weight=55,
     )
 
 
@@ -833,30 +955,78 @@ def _close_covers_alert(
     close: Disposition,
     alert_txs: list[dict[str, Any]],
 ) -> bool:
-    """Reject thin CLOSE explanations that only cover a small slice of TM01 volume."""
+    """Reject thin CLOSE explanations that leave material alert activity unexplained."""
+    measured = alert.get("measured") or {}
+    cited = set(close.evidence_ids)
+
+    if rule == "TM02":
+        # Rapid movement needs the pass-through explained, not only one inbound credit.
+        ins = [t for t in alert_txs if t.get("direction") == "in"]
+        outs = [t for t in alert_txs if t.get("direction") == "out"]
+        if close.reason_code == "OWN_ACCOUNT":
+            return True
+        cited_ins = [t for t in ins if t["transaction_id"] in cited]
+        cited_outs = [t for t in outs if t["transaction_id"] in cited]
+        if outs and not cited_outs and close.reason_code not in {
+            "REFUND_OF_EARLIER_PAYMENT",
+            "INVOICE_MATCHES",
+        }:
+            # Allow loan/event closes only when the narrative clearly funds the outbound purpose.
+            joined = " ".join(close.facts).lower()
+            if any(w in joined for w in ("car", "vehicle", "purchase", "motor", "invoice", "contract")):
+                return bool(cited_ins)
+            return False
+        if ins and not cited_ins and close.reason_code not in {"OWN_ACCOUNT"}:
+            return False
+        return True
+
+    if rule == "TM07":
+        moved = float(measured.get("moved_gbp") or 0.0)
+        if moved <= 0:
+            return True
+        covered = sum(
+            float(t["amount_gbp"]) for t in alert_txs if t["transaction_id"] in cited
+        )
+        if close.reason_code in {"OWN_ACCOUNT", "RETURNING_CUSTOMER"}:
+            # All alerted legs should be own-name/returning, not a thin slice of a larger move.
+            return covered >= 0.85 * moved or (
+                alert_txs and all(t["transaction_id"] in cited for t in alert_txs)
+            )
+        return covered >= 0.85 * moved
+
+    if rule == "TM06":
+        # Must touch the corridor transactions themselves.
+        if any(t["transaction_id"] in cited for t in alert_txs):
+            return True
+        return close.reason_code in {"OWN_ACCOUNT", "INVOICE_MATCHES", "DOCUMENTED_EVENT", "REFUND_OF_EARLIER_PAYMENT", "GROUP_COMPANY"}
+
+    if rule == "TM08":
+        # Third-party alert cannot close as plain OWN_ACCOUNT unless the statement shows the
+        # third-party account name (joint account etc.) — matcher already gates that.
+        return True
+
     if rule != "TM01":
         return True
-    measured = alert.get("measured") or {}
+
     received = float(measured.get("received_gbp") or measured.get("total_gbp") or 0.0)
     if received <= 0:
         return True
-    # Sum amounts of cited alert transactions.
-    cited = set(close.evidence_ids)
     covered = sum(
         float(t["amount_gbp"])
         for t in alert_txs
         if t["transaction_id"] in cited and t.get("direction") == "in"
     )
     if covered <= 0:
-        # Own-account / profile closes may cite docs without listing every tx.
-        if close.reason_code in {"OWN_ACCOUNT", "RETURNING_CUSTOMER", "WITHIN_PROFILE", "GROUP_COMPANY"}:
+        if close.reason_code in {
+            "OWN_ACCOUNT",
+            "RETURNING_CUSTOMER",
+            "WITHIN_PROFILE",
+            "GROUP_COMPANY",
+        }:
             return True
-        covered = sum(float(t["amount_gbp"]) for t in alert_txs if t.get("direction") == "in")
-        # If matcher did not cite txs, require a strong reason code only when single-tx alert.
         if len(alert_txs) <= 1:
             return True
         return False
-    # Explained inflow should cover most of the excess over baseline, or >= 60% of received.
     baseline = float(measured.get("baseline_gbp") or 0.0)
     excess = max(0.0, received - baseline)
     return covered >= 0.6 * received or covered >= 0.8 * excess
