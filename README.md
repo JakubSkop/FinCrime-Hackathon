@@ -2,6 +2,8 @@
 
 Start with `BRIEF.html`, which explains transaction monitoring, the four institutions, their rules and how you are scored. This file is the short version, with what you need while you build.
 
+How the system in this repo decides is written up in [system/README.md](system/README.md).
+
 ## The goal
 
 Build a system that reads transaction monitoring alerts and **closes as many of them as it safely can**. When you finish, we run your system on 800 cases it has never seen, from the same four institutions, in the same format and under the same policies. The score on those unseen cases is what counts most, so build something that works from the policy and the evidence, not something that memorises these cases.
@@ -22,7 +24,7 @@ A CLOSE on a case that needed an RFI or an escalation is the most costly mistake
 | `institutions/emoney/` | E-money firm | 1000 |
 | `institutions/investment/` | Investment firm | 1000 |
 | `institutions/payments_fx/` | Payments and FX firm | 1000 |
-| `system/` | You write your system here | |
+| [`system/`](system/README.md) | The alert-closing system. [How it decides](system/README.md) | |
 | `output/` | You write your system's answers on the development cases here | |
 
 The development cases have no answers. Each institution folder has its own `POLICY.md`, which defines the verdicts, what a case is, the rules that institution runs with their limits, and the policy settings to apply. **The four policies differ.** The unseen cases come in folders with exactly the same files:
@@ -94,7 +96,7 @@ The development cases have no answers. Each institution folder has its own `POLI
 | ESCALATE | `ESC_EARLY_REDEMPTION` | Fund units are bought and quickly sold back to move money |
 | ESCALATE | `ESC_LISTED_PARTY` | The counterparty is the listed party or is controlled by it |
 
-3. **`system/README.md`**: how the system decides, which model it uses if any, and how long and how much a run of 200 cases takes.
+3. **[system/README.md](system/README.md)**: how the system decides, which model it uses if any, and how long and how much a run of 200 cases takes.
 
 4. **`output/<institution>.jsonl`** for all four institutions, made by running your system on the development cases. These must be your system's output, not answers written by hand.
 
