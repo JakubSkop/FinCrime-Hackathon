@@ -96,6 +96,72 @@ def _payments_fx_held_path(
     return None
 
 
+# Soft pass-through defaults — not hard suspicion like fraud, mule language, or lists.
+_SOFT_PASS_THROUGH = frozenset({"ESC_PASS_THROUGH"})
+
+# Still escalate even when the held payment is documented.
+_HARD_ESC_CODES = frozenset(
+    {
+        "ESC_LISTED_PARTY",
+        "ESC_MULE_ACTIVITY",
+        "ESC_ACCOUNT_MISUSE",
+        "ESC_STRUCTURING",
+        "ESC_INVOICE_MISMATCH",
+        "ESC_EARLY_REDEMPTION",
+        "ESC_HIGH_RISK_CORRIDOR",
+        "ESC_THIRD_PARTY_FUNDING",
+    }
+)
+
+
+def _soften_payments_fx_pass_through(
+    bundle: dict[str, Any],
+    dispositions: list[Disposition],
+    held_disp: Disposition | None,
+) -> list[Disposition]:
+    """Keep the held-payment decision first-class on payments/FX.
+
+    POLICY: a documented held release (invoice / own-account) means remaining
+    unexplained rapid outs should draw a purpose/invoice RFI, not a soft
+    ESC_PASS_THROUGH that overrides the held CLOSE. Hard suspicion codes still win.
+    Does not loosen CLOSE — residual coverage may still demote to RFI.
+    """
+    if bundle.get("institution") != "payments_fx" or not held_disp:
+        return dispositions
+    if held_disp.verdict != "CLOSE":
+        return dispositions
+    if any(
+        d.verdict == "ESCALATE" and d.reason_code in _HARD_ESC_CODES for d in dispositions
+    ):
+        return dispositions
+    if not any(
+        d.verdict == "ESCALATE" and d.reason_code in _SOFT_PASS_THROUGH
+        for d in dispositions
+    ):
+        return dispositions
+
+    softened: list[Disposition] = []
+    for d in dispositions:
+        if d.verdict == "ESCALATE" and d.reason_code in _SOFT_PASS_THROUGH:
+            softened.append(
+                Disposition(
+                    "RFI",
+                    "RFI_PURPOSE_DOCUMENTS",
+                    list(d.evidence_ids),
+                    [
+                        "The held payment is supported on file, but other rapid outbound "
+                        "legs still lack matching invoices or purpose documents; ask for "
+                        "those before treating the pass-through as fully explained."
+                    ]
+                    + list(d.facts),
+                    weight=max(d.weight, 70),
+                )
+            )
+        else:
+            softened.append(d)
+    return softened
+
+
 def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
     policy = get_policy(bundle["institution"])
     parsed = prepare_parsed(bundle)
@@ -116,6 +182,7 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
     dispositions.extend(
         explain_alert(bundle, alert, parsed, policy) for alert in bundle["alerts"]
     )
+    dispositions = _soften_payments_fx_pass_through(bundle, dispositions, held_disp)
 
     # Conservative aggregation.
     if any(d.verdict == "ESCALATE" for d in dispositions):
@@ -187,11 +254,13 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
         "evidence": evidence_ids,
     }
 
-    # Optional polish: may rewrite reason text only.
+    # Optional polish. Failure keeps the rule-written reason already stored above.
     try:
         from llm_reason import polish_reason
 
-        decision["reason"] = polish_reason(bundle, decision)
+        polished = polish_reason(bundle, decision)
+        if isinstance(polished, str) and polished.strip():
+            decision["reason"] = polished
     except Exception:
         pass
 
