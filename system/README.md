@@ -13,15 +13,15 @@ Deterministic Python 3 (standard library only) decision engine for the four inst
 7. If unclear but not suspicious → **RFI** with a concrete ask naming the payment where possible (defaults may cite novelty / monthly surge).
 8. Only **CLOSE** when every alert is explained **and** residual unexplained value is immaterial or ≤ the declared TM01 baseline (soft identity/profile codes do not count as value coverage; uncited novel-large legs demote to RFI).
 9. CLOSE gates reject thin stories in general terms: named counterparties for refund CLOSES, invoice/event party alignment, majority-leg coverage for multi-tx rules, and no phrase-only `WITHIN_PROFILE` / prior-review `RETURNING_CUSTOMER` closes.
-10. Optional: if `OPENROUTER_API_KEY` is set, polish the reason text at temperature 0. Verdict, reason code, and evidence IDs stay locked. No case IDs, customer names, or development amounts are hardcoded.
+10. Optional: if `OPENROUTER_API_KEY` is set, polish the reason text at temperature 0. Verdict, reason code, and evidence IDs stay locked. If the key is missing, OpenRouter errors, times out, or returns nothing usable, the rule-written reason is kept and OpenRouter is not called again in that run. Set `OPENROUTER_POLISH=0` to force the default reasons even when a key is present. No case IDs, customer names, or development amounts are hardcoded.
 
 Institution-specific thresholds from each `POLICY.md` are encoded in `policy.py`.
 
 ## Model
 
-Default: no language model (fully deterministic rules + templates).
+Default: no language model. Every verdict, reason code, and reason is produced by the rules and templates. That output is what a run returns when OpenRouter is unset or does not work.
 
-Optional reason polish via OpenRouter chat completions when `OPENROUTER_API_KEY` is present. Default model is `baidu/ernie-5.5-flash-preview:free` (`OPENROUTER_MODEL` overrides). Polishing cannot change the decision.
+Optional reason polish via OpenRouter chat completions when `OPENROUTER_API_KEY` is present and `OPENROUTER_POLISH` is not `0`. Default model is `baidu/ernie-5.5-flash-preview:free` (`OPENROUTER_MODEL` overrides). Polishing cannot change the decision. The first failed request (timeout, HTTP error, connection error, or an API error body) switches the rest of the run back to the default reasons.
 
 ## Run
 
@@ -37,6 +37,7 @@ Regression on clear-cut cases:
 ```bash
 python3 tests/run_audit.py
 python3 tests/stats_smoke.py
+python3 tests/polish_fallback.py
 ```
 
 ## OpenRouter smoke (TypeScript)
@@ -58,4 +59,4 @@ If the key is missing, the script prints how to create one and exits with status
 
 ## Runtime and cost
 
-On this development set (1,000 cases per institution), a full run is a few seconds per institution with no API key ($0). A 200-case run stays well under the 30-minute / ~$4 budgets even with optional reason polish (default free OpenRouter model). The TypeScript OpenRouter smoke is optional and uses the free model above when a key is set.
+On this development set (1,000 cases per institution), a full run is a few seconds per institution with no API key, or when OpenRouter fails and the run falls back ($0). A 200-case run stays well under the 30-minute / ~$4 budgets. The TypeScript OpenRouter smoke is optional and uses the free model above when a key is set.
