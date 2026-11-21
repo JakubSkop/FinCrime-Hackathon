@@ -155,7 +155,7 @@ def close_survives_residual(
     # Novel large legs that docs did not cite → always demote.
     novel_uncited = [t for t in unexplained if t["transaction_id"] in novel_ids]
     if novel_uncited:
-        sample = novel_uncited[0]
+        sample = max(novel_uncited, key=lambda t: float(t.get("amount_gbp") or 0.0))
         return Disposition(
             "RFI",
             "RFI_SOURCE_OF_FUNDS",

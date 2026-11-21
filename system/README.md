@@ -7,7 +7,7 @@ Deterministic Python 3 (standard library only) decision engine for the four inst
 1. Load the institution folder (`cases`, `alerts`, `customers`, `transactions`, `evidence`, `previous_reviews`, `internal_list`).
 2. Parse structured fields from each evidence Markdown file (amounts, parties, accounts, dates).
 3. Build per-customer statistical features from pre-review-window history (amount norms by channel, periodicity, counterparty novelty, channel vs KYC). Stats are priors/demoters only — they never CLOSE alone.
-4. For every alert in a case, try positive explanations first (invoice/contract match, own-account statement, group structure, cash/takings reconciliation, documented events/gifts/refunds, investment early-redemption need letters, returning customer, list-match exoneration).
+4. For every alert in a case, try positive explanations first (invoice/contract match, own-account statement, group structure, cash/takings reconciliation, documented events/gifts/refunds, completion-statement investment funding, group booking collections, early-redemption need letters, returning customer, list-match exoneration).
 5. Apply hard escalate gates (sending-bank fraud reports, mule language in chats, unexplained rapid pass-through, structuring, confirmed listed party, unexplained early redemption, high-risk corridor without docs).
 6. For payments/FX, decide the **held payment** first (invoice gate / own-name / match), then fold in the other alerts.
 7. If unclear but not suspicious → **RFI** with a concrete ask naming the payment where possible (defaults may cite novelty / monthly surge).

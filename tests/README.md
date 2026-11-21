@@ -7,8 +7,8 @@
 | Institution   | Cases | CLOSE | RFI | ESCALATE |
 |---------------|------:|------:|----:|---------:|
 | bank          | ~80   | yes   | yes | yes      |
-| emoney        | ~80   | yes   | yes | yes      |
-| investment    | ~60   | yes   | yes | yes      |
+| emoney        | ~90   | yes   | yes | yes      |
+| investment    | ~70   | yes   | yes | yes      |
 | payments_fx   | ~65   | yes   | yes | yes      |
 
 Patterns covered include fraud reports, unexplained TM02+TM04 networks, TM10 early redemption, exact invoice/cash reconciliations, clean gift letters, TM22-only list outcomes, own-account 5× RFIs, and the payments_fx £10k invoice gate.
