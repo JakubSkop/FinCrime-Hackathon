@@ -187,11 +187,13 @@ def decide_case(bundle: dict[str, Any]) -> dict[str, Any]:
         "evidence": evidence_ids,
     }
 
-    # Optional polish: may rewrite reason text only.
+    # Optional polish. Failure keeps the rule-written reason already stored above.
     try:
         from llm_reason import polish_reason
 
-        decision["reason"] = polish_reason(bundle, decision)
+        polished = polish_reason(bundle, decision)
+        if isinstance(polished, str) and polished.strip():
+            decision["reason"] = polished
     except Exception:
         pass
 
