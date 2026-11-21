@@ -131,23 +131,29 @@ def parse_document(doc: dict[str, Any]) -> dict[str, Any]:
     text = doc.get("text") or ""
     labels = extract_labels(text)
     amounts = all_amounts(text)
+    # Prefer funds actually paid to/from the customer over incidental fees.
     primary = label_amount(
         labels,
-        "amount due",
-        "amount",
-        "fee",
-        "principal amount",
-        "sale price",
         "paid to client's investment account",
-        "turnover",
-        "total",
-        "sum",
+        "amount due",
+        "principal amount",
         "settlement",
         "subscription",
         "gift",
+        "sale price",
+        "amount",
+        "total",
+        "sum",
+        "turnover",
+        "fee",
     )
     if primary is None and amounts:
         primary = amounts[0]
+    # Completion statements: never let conveyancing fees beat sale proceeds.
+    if doc.get("type") == "completion_statement":
+        proceeds = label_amount(labels, "paid to client's investment account")
+        if proceeds is not None:
+            primary = proceeds
 
     parsed = {
         "doc_id": doc["doc_id"],

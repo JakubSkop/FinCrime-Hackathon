@@ -1,5 +1,5 @@
 {
-  "description": "Independently labelled clear-cut audit cases for regression testing. Each case has one dominant, unambiguous story. Labels come from evidence checks (fraud reports, exact invoice/cash reconciliation, clean gift letters, TM22-only list outcomes, own-account 5\u00d7 RFIs, payments_fx invoice gate, unexplained TM02+TM04 networks, TM10 early redemption). Not copied from system output; ambiguous multi-conflict cases are excluded.",
+  "description": "Independently labelled clear-cut audit cases for regression testing. Includes completion-statement TM08 closes and group booking collections. Labels come from evidence checks; ambiguous multi-conflict cases are excluded.",
   "created": "2026-11-21",
   "how_to_use": "Run: python3 tests/run_audit.py",
   "pass_criteria": {
@@ -7,7 +7,7 @@
     "reason_code": "must match reason_code or accepted_reason_codes",
     "must_cite": "if non-empty, system evidence must include all listed IDs"
   },
-  "total_cases": 279,
+  "total_cases": 299,
   "institutions": {
     "bank": {
       "count": 80,
@@ -27,10 +27,10 @@
       }
     },
     "emoney": {
-      "count": 74,
+      "count": 84,
       "verdicts": {
         "ESCALATE": 26,
-        "CLOSE": 26,
+        "CLOSE": 36,
         "RFI": 22
       },
       "patterns": {
@@ -41,13 +41,14 @@
         "list_diff_tm22_only": 7,
         "refund_single": 3,
         "tm02_tm04_unexplained": 12,
-        "list_name_only": 12
+        "list_name_only": 12,
+        "booking_collection": 10
       }
     },
     "investment": {
-      "count": 60,
+      "count": 70,
       "verdicts": {
-        "CLOSE": 30,
+        "CLOSE": 40,
         "RFI": 18,
         "ESCALATE": 12
       },
@@ -55,7 +56,8 @@
         "gift_letter_clean": 20,
         "tm10_documented_need": 10,
         "own_account_5x": 18,
-        "tm10_early_redemption": 12
+        "tm10_early_redemption": 12,
+        "completion_tm08": 10
       }
     },
     "payments_fx": {

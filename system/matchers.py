@@ -456,6 +456,99 @@ def match_collection_or_records(
     return None
 
 
+def _match_booking_collection(
+    doc: dict[str, Any],
+    alert_txs: list[dict[str, Any]],
+    customer: dict[str, Any],
+) -> Disposition | None:
+    """Group booking / trip: many per-person inflows + outbound total to the operator."""
+    if doc.get("type") != "booking_confirmation":
+        return None
+    labels = doc.get("labels") or {}
+    from evidence_parse import label_amount, parse_amount
+
+    per_person = doc.get("primary_amount")
+    # Prefer explicit per-person price when the primary was the total.
+    price_raw = labels.get("price") or ""
+    if "per person" in price_raw.lower():
+        pp = parse_amount(price_raw)
+        if pp is not None:
+            per_person = pp
+    totals = [
+        a
+        for a in (doc.get("amounts") or [])
+        if per_person is None or not _amount_close(float(a), float(per_person), tol=1.0)
+    ]
+    total = None
+    if "total" in price_raw.lower():
+        # e.g. "£185.00 per person, £2,590.00 in total"
+        import re
+
+        found = re.findall(r"£\s*([\d,]+(?:\.\d{1,2})?)", price_raw)
+        if len(found) >= 2:
+            total = float(found[-1].replace(",", ""))
+    if total is None and totals:
+        # Largest non-per-person amount on the doc is usually the trip total.
+        total = max(float(a) for a in (doc.get("amounts") or [0]))
+        if per_person is not None and _amount_close(total, float(per_person), tol=1.0):
+            total = None
+    if per_person is None:
+        return None
+
+    contributors = [
+        t
+        for t in alert_txs
+        if t.get("direction") == "in"
+        and _amount_close(float(t["amount_gbp"]), float(per_person), tol=1.0)
+        and (
+            not t.get("counterparty_name")
+            or names_overlap(t.get("counterparty_name"), doc["text"])
+            or names_overlap(customer.get("name"), doc["text"])
+        )
+    ]
+    operator_outs = []
+    for t in alert_txs:
+        if t.get("direction") != "out":
+            continue
+        cp = t.get("counterparty_name")
+        if cp and (
+            names_overlap(cp, doc["text"])
+            or names_overlap(cp, doc.get("payee"))
+            or "travel" in (cp or "").lower()
+            or "tour" in (cp or "").lower()
+            or "hotel" in (cp or "").lower()
+        ):
+            if total is None or _amount_close(float(t["amount_gbp"]), float(total), tol=2.0):
+                operator_outs.append(t)
+    if len(contributors) < 2 and not operator_outs:
+        return None
+    if not contributors and not operator_outs:
+        return None
+
+    evidence = [doc["doc_id"]] + [t["transaction_id"] for t in contributors]
+    evidence.extend(t["transaction_id"] for t in operator_outs)
+    contrib_total = sum(float(t["amount_gbp"]) for t in contributors)
+    facts = [
+        f"{doc['doc_id']} is a group booking at £{float(per_person):,.2f} per person; "
+        f"{len(contributors)} alerted inbound payment(s) totalling £{contrib_total:,.2f} "
+        f"match the traveller contributions"
+        + (
+            f", and outbound {operator_outs[0]['transaction_id']} of "
+            f"£{float(operator_outs[0]['amount_gbp']):,.2f} to "
+            f"{operator_outs[0].get('counterparty_name')} pays the operator."
+            if operator_outs
+            else "."
+        )
+    ]
+    return Disposition(
+        "CLOSE",
+        "COLLECTION_DOCUMENTED",
+        _uniq(evidence),
+        facts,
+        weight=90,
+    )
+
+
 def match_documented_event(
     parsed: list[dict[str, Any]],
     alert_txs: list[dict[str, Any]],
@@ -466,6 +559,9 @@ def match_documented_event(
         return None
     cust_name = customer.get("name")
     for doc in docs:
+        booking = _match_booking_collection(doc, alert_txs, customer)
+        if booking:
+            return booking
         amt = doc.get("primary_amount")
         if amt is None:
             continue
@@ -511,13 +607,30 @@ def match_documented_event(
                 for out in alert_txs:
                     if out.get("direction") != "out":
                         continue
-                    cp = (out.get("counterparty_name") or "").lower()
-                    if any(w in cp for w in ("motor", "car", "auto", "garage", "dealer", "vehicle")):
+                    out_cp = (out.get("counterparty_name") or "").lower()
+                    if any(
+                        w in out_cp
+                        for w in ("motor", "car", "auto", "garage", "dealer", "vehicle")
+                    ):
                         evidence.append(out["transaction_id"])
                         facts.append(
                             f"Loan purpose is a vehicle purchase, matching outbound "
                             f"{out['transaction_id']} of £{float(out['amount_gbp']):,.2f} to "
                             f"{out.get('counterparty_name')}."
+                        )
+                        break
+            # Booking / event payee outbound when a single matched inbound is not enough for TM02.
+            if doc["type"] in {"booking_confirmation", "venue_email"} and tx.get("direction") == "in":
+                for out in alert_txs:
+                    if out.get("direction") != "out":
+                        continue
+                    if names_overlap(out.get("counterparty_name"), doc["text"]) or names_overlap(
+                        out.get("counterparty_name"), doc.get("payee")
+                    ):
+                        evidence.append(out["transaction_id"])
+                        facts.append(
+                            f"Outbound {out['transaction_id']} of £{float(out['amount_gbp']):,.2f} "
+                            f"to {out.get('counterparty_name')} matches the booking operator."
                         )
                         break
             return Disposition(
@@ -980,18 +1093,43 @@ def match_investment_third_party(
             "redundancy_letter",
         }:
             continue
-        amt = doc.get("primary_amount")
-        if amt is None:
+        labels = doc.get("labels") or {}
+        # Prefer the amount that actually funded the account.
+        from evidence_parse import label_amount
+
+        candidate_amts: list[float] = []
+        for key_amt in (
+            label_amount(labels, "paid to client's investment account"),
+            doc.get("primary_amount"),
+            label_amount(labels, "gift", "settlement", "subscription", "amount"),
+        ):
+            if key_amt is not None and key_amt not in candidate_amts:
+                candidate_amts.append(float(key_amt))
+        for a in doc.get("amounts") or []:
+            if a not in candidate_amts:
+                candidate_amts.append(float(a))
+        if not candidate_amts:
             continue
         for tx in alert_txs:
-            if not _amount_close(float(tx["amount_gbp"]), amt, tol=2.0):
+            tx_amt = float(tx["amount_gbp"])
+            matched_amt = None
+            for amt in candidate_amts:
+                if _amount_close(tx_amt, amt, tol=2.0):
+                    matched_amt = amt
+                    break
+            if matched_amt is None:
                 continue
             # Counterparty should appear in the document when present.
             if tx.get("counterparty_name") and not names_overlap(
                 tx.get("counterparty_name"), doc["text"]
             ):
-                # employment/insurer may pay from company name not in short extract
-                if doc["type"] not in {"employment_contract", "insurer_letter", "completion_statement"}:
+                # employment/insurer/completion may pay from a firm name in the title/text
+                if doc["type"] not in {
+                    "employment_contract",
+                    "insurer_letter",
+                    "completion_statement",
+                    "redundancy_letter",
+                }:
                     continue
             code = (
                 "THIRD_PARTY_DOCUMENTED"
@@ -1003,8 +1141,15 @@ def match_investment_third_party(
                 code,
                 [doc["doc_id"], tx["transaction_id"]],
                 [
-                    f"{doc['doc_id']} ({doc['type']}) for £{amt:,.2f} explains third-party "
-                    f"or documented funding on {tx['transaction_id']}."
+                    f"{doc['doc_id']} ({doc['type']}) for £{matched_amt:,.2f} explains "
+                    f"third-party or documented funding on {tx['transaction_id']} "
+                    f"(£{tx_amt:,.2f}"
+                    + (
+                        f" from {tx.get('counterparty_name')}"
+                        if tx.get("counterparty_name")
+                        else ""
+                    )
+                    + ")."
                 ],
                 weight=87,
             )
@@ -1181,6 +1326,13 @@ def _close_covers_alert(
         if not alert_txs:
             return True
         n_cited = sum(1 for t in alert_txs if t["transaction_id"] in cited)
+        if close.reason_code == "COLLECTION_DOCUMENTED":
+            # Group collections may leave unrelated salary/DD legs uncited.
+            ins = [t for t in alert_txs if t.get("direction") == "in"]
+            cited_ins = [t for t in ins if t["transaction_id"] in cited]
+            if ins and len(cited_ins) >= max(2, (len(ins) + 1) // 2):
+                return True
+            return _cited_share() >= 0.5
         return n_cited >= (len(alert_txs) + 1) // 2 or _cited_share() >= 0.5
 
     if rule in {"TM08", "TM10"}:
