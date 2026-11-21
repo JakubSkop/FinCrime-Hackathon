@@ -26,6 +26,10 @@ def _alert_transactions(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+# Soft CLOSE codes confirm identity/profile, not that each cited payment is funded.
+_SOFT_COVER_CODES = frozenset({"RETURNING_CUSTOMER", "WITHIN_PROFILE"})
+
+
 def explained_amount_gbp(
     bundle: dict[str, Any], dispositions: list[Disposition]
 ) -> tuple[float, float, list[dict[str, Any]]]:
@@ -34,11 +38,45 @@ def explained_amount_gbp(
     total = sum(float(t.get("amount_gbp") or 0.0) for t in txs)
     cited: set[str] = set()
     for d in dispositions:
+        if d.reason_code in _SOFT_COVER_CODES:
+            continue
         cited.update(d.evidence_ids)
     covered_txs = [t for t in txs if t["transaction_id"] in cited]
     covered = sum(float(t.get("amount_gbp") or 0.0) for t in covered_txs)
     unexplained = [t for t in txs if t["transaction_id"] not in cited]
     return covered, total, unexplained
+
+
+def _tm01_baseline(bundle: dict[str, Any]) -> float:
+    for alert in bundle.get("alerts") or []:
+        if alert.get("rule_id") != "TM01":
+            continue
+        measured = alert.get("measured") or {}
+        baseline = measured.get("baseline_gbp")
+        if baseline is not None:
+            return float(baseline)
+    return 0.0
+
+
+def _each_alert_touched(
+    bundle: dict[str, Any], dispositions: list[Disposition]
+) -> list[str]:
+    """Return rule_ids for alerts whose transaction legs are entirely uncited.
+
+    Soft identity/profile closes may count as touching an alert, but
+    ``explained_amount_gbp`` still ignores them for value coverage.
+    """
+    cited: set[str] = set()
+    for d in dispositions:
+        cited.update(d.evidence_ids)
+    missing: list[str] = []
+    for alert in bundle.get("alerts") or []:
+        tids = alert.get("transaction_ids") or []
+        if not tids:
+            continue
+        if not any(tid in cited for tid in tids):
+            missing.append(str(alert.get("rule_id") or alert.get("alert_id")))
+    return missing
 
 
 def close_survives_residual(
@@ -60,14 +98,38 @@ def close_survives_residual(
     if codes <= {"LIST_MATCH_DIFFERENT_PARTY"}:
         return None
 
-    ratio = covered / total
-    # Require most of the alerted value to be tied to cited evidence.
-    if ratio >= 0.75 or not unexplained:
-        return None
+    # Every alert must touch at least one cited transaction.
+    missing_alerts = _each_alert_touched(bundle, dispositions)
+    if missing_alerts:
+        sample = unexplained[0] if unexplained else None
+        detail = (
+            f" (e.g. {sample['transaction_id']} £{float(sample['amount_gbp']):,.2f})"
+            if sample
+            else ""
+        )
+        return Disposition(
+            "RFI",
+            "RFI_SOURCE_OF_FUNDS",
+            [t["transaction_id"] for t in unexplained[:4]],
+            [
+                f"Close explanations do not cite transactions for alert(s) "
+                f"{', '.join(missing_alerts)}{detail}. Ask for source-of-funds or "
+                f"purpose documents covering those alerted legs."
+            ],
+            weight=68,
+        )
 
-    # Small residual (<£500 or <10%) is tolerable when the main story is documented.
+    ratio = covered / total
     residual = total - covered
-    if residual <= 500 or residual / total <= 0.10:
+    baseline = _tm01_baseline(bundle)
+
+    # Strong coverage, or residual no larger than ordinary profile activity.
+    if ratio >= 0.90 or not unexplained:
+        return None
+    if residual <= 250 or residual / total <= 0.05:
+        return None
+    if baseline > 0 and residual <= baseline * 1.15:
+        # Leftover looks like declared income / expected volume, not unexplained excess.
         return None
 
     sample = unexplained[0]
