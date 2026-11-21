@@ -1,0 +1,22 @@
+{
+  "name": "fincrime-openrouter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenRouter TypeScript smoke client for LLM-written verdict reasons",
+  "type": "module",
+  "scripts": {
+    "smoke": "tsx src/smoke.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@openrouter/sdk": "^1.5.127"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

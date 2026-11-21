@@ -39,6 +39,23 @@ python3 tests/run_audit.py
 python3 tests/stats_smoke.py
 ```
 
+## OpenRouter smoke (TypeScript)
+
+Small `@openrouter/sdk` package that makes one end-to-end request and prints the response text. Intended as a scaffold for later LLM-written verdict reasons.
+
+- **Model slug:** `baidu/ernie-5.5-flash-preview:free` ($0 prompt/completion; see https://openrouter.ai/baidu/ernie-5.5-flash-preview:free)
+- **Temperature:** `0`
+- **API key:** read from `OPENROUTER_API_KEY` (never committed). Create one at https://openrouter.ai/keys
+
+```bash
+cd system/openrouter
+npm install
+export OPENROUTER_API_KEY=sk-or-...   # required; exits non-zero if unset
+npm run smoke
+```
+
+If the key is missing, the script prints how to create one and exits with status 1.
+
 ## Runtime and cost
 
-On this development set (1,000 cases per institution), a full run is a few seconds per institution with no API key ($0). A 200-case run stays well under the 30-minute / ~$4 budgets even with optional reason polish (default free OpenRouter model).
+On this development set (1,000 cases per institution), a full run is a few seconds per institution with no API key ($0). A 200-case run stays well under the 30-minute / ~$4 budgets even with optional reason polish (default free OpenRouter model). The TypeScript OpenRouter smoke is optional and uses the free model above when a key is set.
