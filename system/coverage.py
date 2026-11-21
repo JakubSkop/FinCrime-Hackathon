@@ -133,6 +133,46 @@ def close_survives_residual(
             weight=68,
         )
 
+    stats = bundle.get("stats") or {}
+    novel_ids = set(stats.get("novel_large_tx_ids") or [])
+    profile_like = set(stats.get("profile_like_legs") or [])
+    periodic = set(stats.get("periodic_legs") or [])
+    inbound_vs = float(stats.get("inbound_month_vs_history") or 0.0)
+
+    # Treat periodic / profile-like uncited legs as baseline-shaped for residual math.
+    hard_unexplained = [
+        t
+        for t in unexplained
+        if t["transaction_id"] not in profile_like and t["transaction_id"] not in periodic
+    ]
+    profile_residual = sum(
+        float(t.get("amount_gbp") or 0.0)
+        for t in unexplained
+        if t["transaction_id"] in profile_like or t["transaction_id"] in periodic
+    )
+    hard_residual = sum(float(t.get("amount_gbp") or 0.0) for t in hard_unexplained)
+
+    # Novel large legs that docs did not cite → always demote.
+    novel_uncited = [t for t in unexplained if t["transaction_id"] in novel_ids]
+    if novel_uncited:
+        sample = novel_uncited[0]
+        return Disposition(
+            "RFI",
+            "RFI_SOURCE_OF_FUNDS",
+            [t["transaction_id"] for t in novel_uncited[:4]],
+            [
+                f"Documents leave a statistically novel payment unexplained "
+                f"({sample['transaction_id']} £{float(sample['amount_gbp']):,.2f}"
+                + (
+                    f" with {sample.get('counterparty_name')}"
+                    if sample.get("counterparty_name")
+                    else ""
+                )
+                + "). Ask for source-of-funds or purpose documents for that activity."
+            ],
+            weight=70,
+        )
+
     if not unexplained:
         return None
 
@@ -140,16 +180,41 @@ def close_survives_residual(
     baseline = _tm01_baseline(bundle)
 
     # Immaterial leftover, or leftover no larger than declared expected activity.
+    # Profile-like periodic leftovers can count toward the baseline allowance.
+    effective_residual = hard_residual if hard_unexplained else residual
     if residual <= _IMMATERIAL_GBP or residual / total <= _IMMATERIAL_SHARE:
         return None
     if baseline > 0 and residual <= baseline + _BASELINE_SLACK_GBP:
         return None
+    if (
+        baseline > 0
+        and hard_residual <= _IMMATERIAL_GBP
+        and profile_residual <= baseline + _BASELINE_SLACK_GBP
+    ):
+        return None
 
-    sample = unexplained[0]
+    # Surge vs historical monthly inbound with material leftover → RFI.
+    if inbound_vs >= 2.0 and effective_residual > _IMMATERIAL_GBP:
+        sample = (hard_unexplained or unexplained)[0]
+        return Disposition(
+            "RFI",
+            "RFI_SOURCE_OF_FUNDS",
+            [t["transaction_id"] for t in (hard_unexplained or unexplained)[:4]],
+            [
+                f"Inbound activity in the alert window is about {inbound_vs:.1f}× this "
+                f"customer's historical monthly median, and £{effective_residual:,.2f} "
+                f"remains unexplained (e.g. {sample['transaction_id']} "
+                f"£{float(sample['amount_gbp']):,.2f}). Ask for source-of-funds documents "
+                f"covering the excess."
+            ],
+            weight=69,
+        )
+
+    sample = (hard_unexplained or unexplained)[0]
     return Disposition(
         "RFI",
         "RFI_SOURCE_OF_FUNDS",
-        [t["transaction_id"] for t in unexplained[:4]],
+        [t["transaction_id"] for t in (hard_unexplained or unexplained)[:4]],
         [
             f"Documents explain £{covered:,.2f} of £{total:,.2f} alerted value, but "
             f"£{residual:,.2f} remains unexplained (e.g. {sample['transaction_id']} "
