@@ -1,15 +1,15 @@
 /**
  * OpenRouter smoke request — one end-to-end call that prints response text.
  *
- * Default model slug: openai/gpt-4o-mini
- * (cheap, widely available text model on https://openrouter.ai/models)
+ * Default model slug: baidu/ernie-5.5-flash-preview:free
+ * (free chat model; $0 prompt/completion on https://openrouter.ai/models)
  */
 
 import { OpenRouter } from "@openrouter/sdk";
 import type { OpenResponsesResult } from "@openrouter/sdk/models";
 
-/** Cheap/reliable default for short verdict-style text. */
-export const DEFAULT_MODEL = "openai/gpt-4o-mini";
+/** Free-tier default: reliable free chat model with $0 pricing. */
+export const DEFAULT_MODEL = "baidu/ernie-5.5-flash-preview:free";
 
 const KEYS_URL = "https://openrouter.ai/keys";
 

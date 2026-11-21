@@ -6,9 +6,12 @@ TypeScript package using the official [`@openrouter/sdk`](https://www.npmjs.com/
 
 | Setting | Value |
 |---|---|
-| Slug | `openai/gpt-4o-mini` |
+| Slug | `baidu/ernie-5.5-flash-preview:free` |
+| Pricing | `$0` prompt / `$0` completion (free endpoint; rate-limited) |
 | Temperature | `0` |
-| Catalog | https://openrouter.ai/models |
+| Catalog | https://openrouter.ai/baidu/ernie-5.5-flash-preview:free |
+
+Chosen as a currently available free chat model (`:free` suffix) so smoke works with a $0 OpenRouter credit limit. Confirmed on the OpenRouter model page and models API as $0/$0; subject to free-tier rate limits.
 
 ## Setup
 
