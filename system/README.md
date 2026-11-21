@@ -50,6 +50,12 @@ system/run institutions/investment output/investment.jsonl
 system/run institutions/payments_fx output/payments_fx.jsonl
 ```
 
+Browsable HTML of all case verdicts (filters by institution / verdict):
+
+```bash
+python3 system/generate_case_verdicts_html.py -o output/case-verdicts.html
+```
+
 ## Inside one case
 
 ```mermaid
