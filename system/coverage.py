@@ -1,10 +1,24 @@
-"""Case-level residual unexplained-money checks before allowing CLOSE."""
+"""Case-level residual unexplained-money checks before allowing CLOSE.
+
+Thresholds here are policy/materiality rules, not fits to development quirks:
+- every alert must cite at least one of its own transactions
+- identity/profile closes do not count as explaining payment value
+- leftover value may remain only if it is immaterial, or no larger than the
+  customer's declared TM01 baseline (ordinary expected activity)
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 from matchers import Disposition
+
+# Immaterial leftover: absolute floor and share of alerted value (same spirit as
+# a de-minimis write-off — not tuned to a particular institution's case mix).
+_IMMATERIAL_GBP = 500.0
+_IMMATERIAL_SHARE = 0.10
+# Tiny slack so baseline comparisons are not brittle to rounding in salaries.
+_BASELINE_SLACK_GBP = 50.0
 
 
 def _alert_transactions(bundle: dict[str, Any]) -> list[dict[str, Any]]:
@@ -119,17 +133,16 @@ def close_survives_residual(
             weight=68,
         )
 
-    ratio = covered / total
+    if not unexplained:
+        return None
+
     residual = total - covered
     baseline = _tm01_baseline(bundle)
 
-    # Strong coverage, or residual no larger than ordinary profile activity.
-    if ratio >= 0.90 or not unexplained:
+    # Immaterial leftover, or leftover no larger than declared expected activity.
+    if residual <= _IMMATERIAL_GBP or residual / total <= _IMMATERIAL_SHARE:
         return None
-    if residual <= 250 or residual / total <= 0.05:
-        return None
-    if baseline > 0 and residual <= baseline * 1.15:
-        # Leftover looks like declared income / expected volume, not unexplained excess.
+    if baseline > 0 and residual <= baseline + _BASELINE_SLACK_GBP:
         return None
 
     sample = unexplained[0]
