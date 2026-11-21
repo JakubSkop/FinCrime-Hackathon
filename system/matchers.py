@@ -128,17 +128,9 @@ def match_invoice(
                 names_overlap(supplier, tx.get("counterparty_name"))
                 or names_overlap(tx.get("counterparty_name"), doc["text"])
             ):
-                # Still allow amount-only match when supplier label absent/unparseable.
-                if supplier and doc.get("type") in {
-                    "invoice",
-                    "supplier_invoice",
-                    "supplier_invoices",
-                    "consulting_contract",
-                    "contract_schedule",
-                    "supply_contract",
-                    "payment_file",
-                }:
-                    continue
+                # Named supplier/payee must align with the counterparty — no amount-only CLOSE.
+                continue
+            # Amount-only is allowed only when the document has no parseable supplier/payee.
             found = None
             for i, amt in enumerate(amounts):
                 if i in used_amt_idx:
@@ -154,14 +146,16 @@ def match_invoice(
 
         if not matched_txs:
             # Clear name mismatch on a single comparable amount → possible invoice mismatch.
+            # Only when the tx names a counterparty; cash/null CP is not an identity clash.
+            tx = alert_txs[0] if len(alert_txs) == 1 else None
             if (
-                len(alert_txs) == 1
+                tx is not None
                 and supplier
+                and tx.get("counterparty_name")
                 and primary is not None
-                and _amount_close(float(alert_txs[0]["amount_gbp"]), primary, tol=1.0)
-                and not names_overlap(supplier, alert_txs[0].get("counterparty_name"))
+                and _amount_close(float(tx["amount_gbp"]), primary, tol=1.0)
+                and not names_overlap(supplier, tx.get("counterparty_name"))
             ):
-                tx = alert_txs[0]
                 mismatch = Disposition(
                     "ESCALATE",
                     "ESC_INVOICE_MISMATCH",
@@ -470,6 +464,7 @@ def match_documented_event(
     docs = _docs_of(parsed, EVENT_TYPES)
     if not docs or not alert_txs:
         return None
+    cust_name = customer.get("name")
     for doc in docs:
         amt = doc.get("primary_amount")
         if amt is None:
@@ -481,6 +476,18 @@ def match_documented_event(
             if gap is not None and gap > 60:
                 continue
             text_l = doc["text"].lower()
+            cp = tx.get("counterparty_name")
+            # When the tx names a counterparty, require the doc to mention them (or the customer).
+            if cp and not (
+                names_overlap(cp, doc.get("payee"))
+                or names_overlap(cp, doc.get("payer"))
+                or names_overlap(cp, doc["text"])
+                or names_overlap(cust_name, doc["text"])
+            ):
+                continue
+            # Cash / unnamed counterparties: the customer must appear on the document.
+            if not cp and not names_overlap(cust_name, doc["text"]):
+                continue
             if doc["type"] == "gift_letter":
                 code = "THIRD_PARTY_DOCUMENTED"
             elif doc["type"] in {
@@ -491,7 +498,7 @@ def match_documented_event(
                 code = "REFUND_OF_EARLIER_PAYMENT"
             else:
                 code = "DOCUMENTED_EVENT"
-            who = tx.get("counterparty_name") or doc.get("payee") or "the counterparty"
+            who = cp or doc.get("payee") or "the counterparty"
             evidence = [doc["doc_id"], tx["transaction_id"]]
             facts = [
                 f"{doc['doc_id']} documents £{amt:,.2f} involving {who}, matching "
@@ -533,14 +540,19 @@ def match_refund(
             continue
         amt = float(tx["amount_gbp"])
         cp = tx.get("counterparty_name")
+        # Cash with no named counterparty is never a safe amount-only refund CLOSE.
+        # Refund docs are handled in match_documented_event instead.
+        if not cp:
+            continue
         for prior in customer_txs:
             if prior["transaction_id"] == tx["transaction_id"]:
                 continue
             if prior.get("direction") != "out":
                 continue
-            if not _amount_close(float(prior["amount_gbp"]), amt, tol=1.0):
+            prior_cp = prior.get("counterparty_name")
+            if not prior_cp or not names_overlap(cp, prior_cp):
                 continue
-            if cp and prior.get("counterparty_name") and not names_overlap(cp, prior.get("counterparty_name")):
+            if not _amount_close(float(prior["amount_gbp"]), amt, tol=1.0):
                 continue
             # prior should be before this tx
             if (prior.get("booked_at") or "") >= (tx.get("booked_at") or ""):
@@ -775,52 +787,33 @@ def match_returning_customer(
     reviews: list[dict[str, Any]],
     alert_txs: list[dict[str, Any]],
 ) -> Disposition | None:
+    del reviews  # Prior CLOSE notes only cover what they describe — too soft for CLOSE.
     if alert.get("rule_id") != "TM07":
         return None
-    # Prefer explicit reverification / KYC + dormancy explanation docs.
-    useful = [
-        d
-        for d in parsed
-        if d["type"]
-        in {
-            "reverification_record",
-            "due_diligence_summary",
-            "contact_note",
-            "support_chat",
-            "customer_email",
-            "customer_letter",
-        }
-    ]
-    # If a prior review closed dormancy-like activity, only reuse if note covers this.
-    for rev in reviews:
-        note = (rev.get("note") or "").lower()
-        if rev.get("verdict") == "CLOSE" and any(
-            w in note for w in ("dormant", "reactiv", "returned", "resume", "back")
-        ):
-            ids = [rev.get("review_id")] + [t["transaction_id"] for t in alert_txs[:1]]
-            return Disposition(
-                "CLOSE",
-                "RETURNING_CUSTOMER",
-                _uniq([i for i in ids if i]),
-                [
-                    f"Earlier review {rev.get('review_id')} closed similar reactivation: "
-                    f"{rev.get('note')}"
-                ],
-                weight=70,
-            )
-    # Documented event already may explain TM07; if reverification recently done, soft close.
-    for doc in useful:
-        if doc["type"] == "reverification_record":
-            return Disposition(
-                "CLOSE",
-                "RETURNING_CUSTOMER",
-                [doc["doc_id"]] + [t["transaction_id"] for t in alert_txs[:1]],
-                [
-                    f"Identity re-verification {doc['doc_id']} supports that the verified "
-                    f"customer resumed use of the dormant account."
-                ],
-                weight=72,
-            )
+    measured = alert.get("measured") or {}
+    moved = float(measured.get("moved_gbp") or 0.0)
+    # Require an explicit reverification record. Do not auto-cite every alerted
+    # leg — residual coverage must still see unexplained value if present.
+    for doc in parsed:
+        if doc["type"] != "reverification_record":
+            continue
+        if not alert_txs:
+            continue
+        primary = max(alert_txs, key=lambda t: float(t.get("amount_gbp") or 0.0))
+        if moved > 0 and float(primary["amount_gbp"]) < 0.85 * moved:
+            # Single largest leg is only a thin slice of the dormancy move.
+            continue
+        return Disposition(
+            "CLOSE",
+            "RETURNING_CUSTOMER",
+            [doc["doc_id"], primary["transaction_id"]],
+            [
+                f"Identity re-verification {doc['doc_id']} supports that the verified "
+                f"customer resumed use of the dormant account "
+                f"({primary['transaction_id']} £{float(primary['amount_gbp']):,.2f})."
+            ],
+            weight=72,
+        )
     return None
 
 
@@ -835,6 +828,10 @@ def match_within_profile(
         return None
     measured = alert.get("measured") or {}
     multiple = measured.get("multiple")
+    limit = measured.get("limit_multiple")
+    # Phrase-only notes must not CLOSE alerts that clearly exceed the profile limit.
+    if multiple is not None and limit is not None and float(multiple) > float(limit) * 1.05:
+        return None
     baseline = declared_baseline_gbp(customer, policy)
     # Only close as within-profile when a free-text contact/staff note explicitly says so.
     # Do not use KYC templates — they always mention salary / expected channels.
@@ -1107,6 +1104,17 @@ def _close_covers_alert(
     measured = alert.get("measured") or {}
     cited = set(close.evidence_ids)
 
+    def _cited_share() -> float:
+        if not alert_txs:
+            return 1.0
+        total = sum(float(t["amount_gbp"]) for t in alert_txs)
+        if total <= 0:
+            return 1.0
+        covered = sum(
+            float(t["amount_gbp"]) for t in alert_txs if t["transaction_id"] in cited
+        )
+        return covered / total
+
     if rule == "TM02":
         # Rapid movement needs the pass-through explained, not only one inbound credit.
         ins = [t for t in alert_txs if t.get("direction") == "in"]
@@ -1146,12 +1154,49 @@ def _close_covers_alert(
         # Must touch the corridor transactions themselves.
         if any(t["transaction_id"] in cited for t in alert_txs):
             return True
-        return close.reason_code in {"OWN_ACCOUNT", "INVOICE_MATCHES", "DOCUMENTED_EVENT", "REFUND_OF_EARLIER_PAYMENT", "GROUP_COMPANY"}
+        return close.reason_code in {
+            "OWN_ACCOUNT",
+            "INVOICE_MATCHES",
+            "DOCUMENTED_EVENT",
+            "REFUND_OF_EARLIER_PAYMENT",
+            "GROUP_COMPANY",
+        }
+
+    if rule == "TM05":
+        # Large cash alert: the cash leg itself must be cited.
+        if not alert_txs:
+            return True
+        return any(t["transaction_id"] in cited for t in alert_txs)
+
+    if rule == "TM03":
+        # Structuring / repeated below-threshold: need most deposit legs covered.
+        if len(alert_txs) <= 1:
+            return any(t["transaction_id"] in cited for t in alert_txs) or not alert_txs
+        return _cited_share() >= 0.75 or sum(
+            1 for t in alert_txs if t["transaction_id"] in cited
+        ) >= max(2, len(alert_txs) - 1)
+
+    if rule == "TM04":
+        # Fan-in/out: a single matched invoice must not clear a many-party network.
+        if close.reason_code in {"INVOICE_MATCHES", "GROUP_COMPANY", "OWN_ACCOUNT"}:
+            return _cited_share() >= 0.5 or sum(
+                1 for t in alert_txs if t["transaction_id"] in cited
+            ) >= min(3, max(1, len(alert_txs) // 2))
+        return _cited_share() >= 0.6
 
     if rule == "TM08":
-        # Third-party alert cannot close as plain OWN_ACCOUNT unless the statement shows the
-        # third-party account name (joint account etc.) — matcher already gates that.
-        return True
+        # Third-party alert: cite at least one third-party leg.
+        if not alert_txs:
+            return True
+        return any(t["transaction_id"] in cited for t in alert_txs)
+
+    if rule == "TM10":
+        if not alert_txs:
+            return True
+        return any(t["transaction_id"] in cited for t in alert_txs) or close.reason_code in {
+            "DOCUMENTED_EVENT",
+            "OWN_ACCOUNT",
+        }
 
     if rule != "TM01":
         return True
@@ -1177,7 +1222,8 @@ def _close_covers_alert(
         return False
     baseline = float(measured.get("baseline_gbp") or 0.0)
     excess = max(0.0, received - baseline)
-    return covered >= 0.6 * received or covered >= 0.8 * excess
+    # Cover most of received, or most of the excess above declared baseline.
+    return covered >= 0.6 * received or (excess > 0 and covered >= 0.8 * excess)
 
 
 def default_for_rule(
